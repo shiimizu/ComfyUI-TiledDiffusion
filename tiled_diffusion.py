@@ -502,6 +502,34 @@ class MixtureOfDiffusers(AbstractDiffusion):
         x_out = self.x_buffer
         return x_out
 
+def _find_outer_instance(target, target_type, limit=10):
+    import inspect
+    frame = inspect.currentframe()
+    li=0
+    while frame:
+        li += 1
+        if li>limit:return None
+        if target in frame.f_locals:
+            found = frame.f_locals[target]
+            if isinstance(found, target_type):
+                return found
+        frame = frame.f_back
+    return None
+
+from comfy.controlnet import ControlNet, T2IAdapter
+def get_control(self,*args,**kwargs):
+    if (model_options:=_find_outer_instance('model_options', dict, 3)) is not None:
+        if 'tiled_diffusion' in model_options:
+            return self
+    return self.get_control_original(*args, **kwargs)
+def hook_controlnet_get_control():
+    if not hasattr(ControlNet, 'get_control_original'):
+        ControlNet.get_control_original = ControlNet.get_control
+    if not hasattr(T2IAdapter, 'get_control_original'):
+        T2IAdapter.get_control_original = T2IAdapter.get_control
+    ControlNet.get_control = get_control
+    T2IAdapter.get_control = get_control
+hook_controlnet_get_control()
 
 MAX_RESOLUTION=8192
 class TiledDiffusion():
