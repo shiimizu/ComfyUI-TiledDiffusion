@@ -1,0 +1,578 @@
+from __future__ import division
+import torch
+from torch import Tensor
+import comfy.model_management
+import comfy.model_patcher
+from comfy.model_base import BaseModel
+from typing import List, Union, Tuple, Dict
+from tqdm import tqdm
+
+opt_C = 4
+opt_f = 8
+
+def ceildiv(big, small):
+    # Correct ceiling division that avoids floating-point errors and importing math.ceil.
+    return -(big // -small)
+
+from enum import Enum
+class BlendMode(Enum):  # i.e. LayerType
+    FOREGROUND = 'Foreground'
+    BACKGROUND = 'Background'
+
+class Processing: ...
+class Device: ...
+devices = Device()
+devices.device = comfy.model_management.get_torch_device()
+
+def null_decorator(fn):
+    def wrapper(*args, **kwargs):
+        return fn(*args, **kwargs)
+    return wrapper
+
+keep_signature = null_decorator
+controlnet     = null_decorator
+stablesr       = null_decorator
+grid_bbox      = null_decorator
+custom_bbox    = null_decorator
+noise_inverse  = null_decorator
+
+class BBox:
+    ''' grid bbox '''
+
+    def __init__(self, x:int, y:int, w:int, h:int):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.box = [x, y, x+w, y+h]
+        self.slicer = slice(None), slice(None), slice(y, y+h), slice(x, x+w)
+
+    def __getitem__(self, idx:int) -> int:
+        return self.box[idx]
+
+def split_bboxes(w:int, h:int, tile_w:int, tile_h:int, overlap:int=16, init_weight:Union[Tensor, float]=1.0) -> Tuple[List[BBox], Tensor]:
+    cols = ceildiv((w - overlap) , (tile_w - overlap))
+    rows = ceildiv((h - overlap) , (tile_h - overlap))
+    dx = (w - tile_w) / (cols - 1) if cols > 1 else 0
+    dy = (h - tile_h) / (rows - 1) if rows > 1 else 0
+
+    bbox_list: List[BBox] = []
+    weight = torch.zeros((1, 1, h, w), device=devices.device, dtype=torch.float32)
+    for row in range(rows):
+        y = min(int(row * dy), h - tile_h)
+        for col in range(cols):
+            x = min(int(col * dx), w - tile_w)
+
+            bbox = BBox(x, y, tile_w, tile_h)
+            bbox_list.append(bbox)
+            weight[bbox.slicer] += init_weight
+
+    return bbox_list, weight
+
+class CustomBBox(BBox):
+    ''' region control bbox '''
+    pass
+
+class AbstractDiffusion:
+    def __init__(self):
+        self.method = self.__class__.__name__
+        self.pbar = None
+
+
+        self.w: int = 512
+        self.h: int = 512
+        self.tile_width: int = None
+        self.tile_height: int = None
+        self.tile_overlap: int = None
+        self.tile_batch_size: int = None
+
+        # cache. final result of current sampling step, [B, C=4, H//8, W//8]
+        # avoiding overhead of creating new tensors and weight summing
+        self.x_buffer: Tensor = None
+        # self.w: int = int(self.p.width  // opt_f)       # latent size
+        # self.h: int = int(self.p.height // opt_f)
+        # weights for background & grid bboxes
+        self._weights: Tensor = None
+        # self.weights: Tensor = torch.zeros((1, 1, self.h, self.w), device=devices.device, dtype=torch.float32)
+        self._init_grid_bbox = None
+        self._init_done = None
+
+        # count the step correctly
+        self.step_count = 0         
+        self.inner_loop_count = 0  
+        self.kdiff_step = -1
+
+        # ext. Grid tiling painting (grid bbox)
+        self.enable_grid_bbox: bool = False
+        self.tile_w: int = None
+        self.tile_h: int = None
+        self.tile_bs: int = None
+        self.num_tiles: int = None
+        self.num_batches: int = None
+        self.batched_bboxes: List[List[BBox]] = []
+
+        # ext. Region Prompt Control (custom bbox)
+        self.enable_custom_bbox: bool = False
+        self.custom_bboxes: List[CustomBBox] = []
+        # self.cond_basis: Cond = None
+        # self.uncond_basis: Uncond = None
+        # self.draw_background: bool = True       # by default we draw major prompts in grid tiles
+        # self.causal_layers: bool = None
+
+        # ext. ControlNet
+        self.enable_controlnet: bool = False
+        # self.controlnet_script: ModuleType = None
+        self.control_tensor_batch: List[List[Tensor]] = None # []
+        self.control_params: Dict[str, Tensor] = None # {}
+        self.control_tensor_cpu: bool = None
+        self.control_tensor_custom: List[List[Tensor]] = []
+
+        self.draw_background: bool = True       # by default we draw major prompts in grid tiles
+        self.control_tensor_cpu = False
+
+    def repeat_tensor(self, x:Tensor, n:int, concat=False, concat_to=0) -> Tensor:
+        ''' repeat the tensor on it's first dim '''
+        if n == 1: return x
+        B = x.shape[0]
+        r_dims = len(x.shape) - 1
+        if B == 1:      # batch_size = 1 (not `tile_batch_size`)
+            shape = [n] + [-1] * r_dims     # [N, -1, ...]
+            return x.expand(shape)          # `expand` is much lighter than `tile`
+        else:
+            if concat:
+                return torch.cat([x for _ in range(n)], dim=0)[:concat_to]
+            shape = [n] + [1] * r_dims      # [N, 1, ...]
+            return x.repeat(shape)
+    def update_pbar(self):
+        if self.pbar.n >= self.pbar.total:
+            self.pbar.close()
+        else:
+            # self.pbar.update()
+            sampling_step = 20
+            if self.step_count == sampling_step:
+                self.inner_loop_count += 1
+                if self.inner_loop_count < self.total_bboxes:
+                    self.pbar.update()
+            else:
+                self.step_count = sampling_step
+                self.inner_loop_count = 0
+    def reset_buffer(self, x_in:Tensor):
+        # Judge if the shape of x_in is the same as the shape of x_buffer
+        if self.x_buffer is None or self.x_buffer.shape != x_in.shape:
+            self.x_buffer = torch.zeros_like(x_in, device=x_in.device, dtype=x_in.dtype)
+        else:
+            self.x_buffer.zero_()
+
+    @grid_bbox
+    def init_grid_bbox(self, tile_w:int, tile_h:int, overlap:int, tile_bs:int):
+        # if self._init_grid_bbox is not None: return
+        # self._init_grid_bbox = True
+        self.weights: Tensor = torch.zeros((1, 1, self.h, self.w), device=devices.device, dtype=torch.float32)
+        self.enable_grid_bbox = True
+
+        self.tile_w = min(tile_w, self.w)
+        self.tile_h = min(tile_h, self.h)
+        overlap = max(0, min(overlap, min(tile_w, tile_h) - 4))
+        # split the latent into overlapped tiles, then batching
+        # weights basically indicate how many times a pixel is painted
+        bboxes, weights = split_bboxes(self.w, self.h, self.tile_w, self.tile_h, overlap, self.get_tile_weights())
+        self.weights += weights
+        self.num_tiles = len(bboxes)
+        self.num_batches = ceildiv(self.num_tiles , tile_bs)
+        self.tile_bs = ceildiv(len(bboxes) , self.num_batches)          # optimal_batch_size
+        self.batched_bboxes = [bboxes[i*self.tile_bs:(i+1)*self.tile_bs] for i in range(self.num_batches)]
+
+    @grid_bbox
+    def get_tile_weights(self) -> Union[Tensor, float]:
+        return 1.0
+
+    @noise_inverse
+    def init_noise_inverse(self, steps:int, retouch:float, get_cache_callback, set_cache_callback, renoise_strength:float, renoise_kernel:int):
+        self.noise_inverse_enabled = True
+        self.noise_inverse_steps = steps
+        self.noise_inverse_retouch = float(retouch)
+        self.noise_inverse_renoise_strength = float(renoise_strength)
+        self.noise_inverse_renoise_kernel = int(renoise_kernel)
+        self.noise_inverse_set_cache = set_cache_callback
+        self.noise_inverse_get_cache = get_cache_callback
+
+    def init_done(self):
+        '''
+          Call this after all `init_*`, settings are done, now perform:
+            - settings sanity check 
+            - pre-computations, cache init
+            - anything thing needed before denoising starts
+        '''
+
+        # if self._init_done is not None: return
+        # self._init_done = True
+        self.total_bboxes = 0
+        if self.enable_grid_bbox:   self.total_bboxes += self.num_batches
+        if self.enable_custom_bbox: self.total_bboxes += len(self.custom_bboxes)
+        assert self.total_bboxes > 0, "Nothing to paint! No background to draw and no custom bboxes were provided."
+
+        # sampling_steps = _steps
+        # self.pbar = tqdm(total=(self.total_bboxes) * sampling_steps, desc=f"{self.method} Sampling: ")
+
+    @controlnet
+    def prepare_controlnet_tensors(self, refresh:bool=False, tensor=None):
+        ''' Crop the control tensor into tiles and cache them '''
+        # if not refresh:
+        #     if self.control_tensor_batch is not None or self.control_params is not None: return
+        # if hasattr(self, 'control_tensor_batch'):
+        #     del self.control_tensor_batch
+        #     self.control_tensor_batch = None
+        # if hasattr(self, 'org_control_tensor_batch'):
+        #     del self.org_control_tensor_batch
+        #     self.org_control_tensor_batch = None
+        tensors = [tensor]
+        self.org_control_tensor_batch = tensors
+        self.control_tensor_batch = []
+        for i in range(len(tensors)):
+            control_tile_list = []
+            control_tensor = tensors[i]
+            for bboxes in self.batched_bboxes:
+                single_batch_tensors = []
+                for bbox in bboxes:
+                    if len(control_tensor.shape) == 3:
+                        control_tensor.unsqueeze_(0)
+                    control_tile = control_tensor[:, :, bbox[1]*opt_f:bbox[3]*opt_f, bbox[0]*opt_f:bbox[2]*opt_f]
+                    single_batch_tensors.append(control_tile)
+                control_tile = torch.cat(single_batch_tensors, dim=0)
+                if self.control_tensor_cpu:
+                    control_tile = control_tile.cpu()
+                control_tile_list.append(control_tile)
+            self.control_tensor_batch.append(control_tile_list)
+
+            if len(self.custom_bboxes) > 0:
+                custom_control_tile_list = []
+                for bbox in self.custom_bboxes:
+                    if len(control_tensor.shape) == 3:
+                        control_tensor.unsqueeze_(0)
+                    control_tile = control_tensor[:, :, bbox[1]*opt_f:bbox[3]*opt_f, bbox[0]*opt_f:bbox[2]*opt_f]
+                    if self.control_tensor_cpu:
+                        control_tile = control_tile.cpu()
+                    custom_control_tile_list.append(control_tile)
+                self.control_tensor_custom.append(custom_control_tile_list)
+
+    @controlnet
+    def switch_controlnet_tensors(self, batch_id:int, x_batch_size:int, tile_batch_size:int, is_denoise=False):
+        # if not self.enable_controlnet: return
+        if self.control_tensor_batch is None: return
+        self.control_params = [0]
+
+        for param_id in range(len(self.control_params)):
+            # tensor that was concatenated in `prepare_controlnet_tensors`
+            control_tile = self.control_tensor_batch[param_id][batch_id]
+            # broadcast to latent batch size
+            if x_batch_size > 1: # self.is_kdiff:
+                all_control_tile = []
+                for i in range(tile_batch_size):
+                    this_control_tile = [control_tile[i].unsqueeze(0)] * x_batch_size
+                    all_control_tile.append(torch.cat(this_control_tile, dim=0))
+                control_tile = torch.cat(all_control_tile, dim=0) # [:x_tile.shape[0]]
+                self.control_tensor_batch[param_id][batch_id] = control_tile
+            # else:
+            #     control_tile = control_tile.repeat([x_batch_size if is_denoise else x_batch_size * 2, 1, 1, 1])
+            # self.control_params[param_id].hint_cond = control_tile.to(devices.device)
+
+import numpy as np
+from numpy import pi, exp, sqrt
+def gaussian_weights(tile_w:int, tile_h:int) -> Tensor:
+    '''
+    Copy from the original implementation of Mixture of Diffusers
+    https://github.com/albarji/mixture-of-diffusers/blob/master/mixdiff/tiling.py
+    This generates gaussian weights to smooth the noise of each tile.
+    This is critical for this method to work.
+    '''
+    f = lambda x, midpoint, var=0.01: exp(-(x-midpoint)*(x-midpoint) / (tile_w*tile_w) / (2*var)) / sqrt(2*pi*var)
+    x_probs = [f(x, (tile_w - 1) / 2) for x in range(tile_w)]   # -1 because index goes from 0 to latent_width - 1
+    y_probs = [f(y,  tile_h      / 2) for y in range(tile_h)]
+
+    w = np.outer(y_probs, x_probs)
+    return torch.from_numpy(w).to(devices.device, dtype=torch.float32)
+
+class CondDict: ...
+
+class MultiDiffusion(AbstractDiffusion):
+    
+    @torch.no_grad()
+    def apply_model(self, model: BaseModel.apply_model, args: dict):
+        # self.inner_model = model
+        c_in: dict = args["c"]
+        x_in: Tensor = args["input"]
+        t_in: Tensor = args["timestep"]
+        cond_or_uncond = args["cond_or_uncond"]
+
+        self.w = x_in.shape[3]
+        self.h = x_in.shape[2]
+        self.init_grid_bbox(self.tile_width, self.tile_height, self.tile_overlap, self.tile_batch_size)
+        # init everything done, perform sanity check & pre-computations
+        self.init_done()
+
+        N, C, H, W = x_in.shape
+
+        # clear buffer canvas
+        self.reset_buffer(x_in)
+        c_crossattn = c_in['c_crossattn']
+        c_crossattn = c_crossattn.clone() if c_crossattn.shape[0] == 1 else c_crossattn
+        if 'control' in c_in:
+            control = c_in['control']
+            cond_hint_original = control.cond_hint_original
+
+        # Background sampling (grid bbox)
+        if self.draw_background:
+            for batch_id, bboxes in enumerate(self.batched_bboxes):
+                if comfy.model_management.processing_interrupted(): 
+                    # self.pbar.close()
+                    return x_in
+
+                # batching & compute tiles
+                x_tile = torch.cat([x_in[bbox.slicer] for bbox in bboxes], dim=0)   # [TB, C, TH, TW]
+                n_rep = len(bboxes)
+                ts_tile = self.repeat_tensor(t_in, n_rep)
+                cond_tile = self.repeat_tensor(c_crossattn, n_rep)
+                c_tile = c_in.copy()
+                c_tile['c_crossattn'] = cond_tile
+                if 'y' in c_tile:
+                    c_tile['y'] = self.repeat_tensor(c_tile['y'], n_rep)
+
+                # controlnet tiling
+                # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
+                if 'control' in c_in:
+                    param_id = 0
+                    self.prepare_controlnet_tensors(refresh=True, tensor=control.cond_hint_original)
+                    self.switch_controlnet_tensors(batch_id, N, len(bboxes))
+                    control.cond_hint_original = self.control_tensor_batch[param_id][batch_id]
+                    c_tile['control'] = control.get_control(x_tile, ts_tile, c_tile, len(cond_or_uncond))
+                    control.cond_hint_original = cond_hint_original
+                    if hasattr(control, 'cond_hint'):
+                        del control.cond_hint
+                        control.cond_hint = None
+
+                # stablesr tiling
+                # self.switch_stablesr_tensors(batch_id)
+
+                x_tile_out = model(x_tile, ts_tile, **c_tile)
+
+                for i, bbox in enumerate(bboxes):
+                    self.x_buffer[bbox.slicer] += x_tile_out[i*N:(i+1)*N, :, :, :]
+
+                # update progress bar
+                # self.update_pbar()
+
+        # Averaging background buffer
+        x_out = torch.where(self.weights > 1, self.x_buffer / self.weights, self.x_buffer)
+
+        return x_out
+
+class MixtureOfDiffusers(AbstractDiffusion):
+    """
+        Mixture-of-Diffusers Implementation
+        https://github.com/albarji/mixture-of-diffusers
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # weights for custom bboxes
+        self.custom_weights: List[Tensor] = []
+        self.get_weight = gaussian_weights
+
+    def init_done(self):
+        super().init_done()
+        # The original gaussian weights can be extremely small, so we rescale them for numerical stability
+        self.rescale_factor = 1 / self.weights
+        # Meanwhile, we rescale the custom weights in advance to save time of slicing
+        for bbox_id, bbox in enumerate(self.custom_bboxes):
+            if bbox.blend_mode == BlendMode.BACKGROUND:
+                self.custom_weights[bbox_id] *= self.rescale_factor[bbox.slicer]
+
+    @grid_bbox
+    def get_tile_weights(self) -> Tensor:
+        # weights for grid bboxes
+        # if not hasattr(self, 'tile_weights'):
+        # x_in can change sizes cause of ConditioningSetArea, so we have to recalcualte each time
+        self.tile_weights = self.get_weight(self.tile_w, self.tile_h)
+        return self.tile_weights
+
+    @torch.no_grad()
+    def apply_model(self, model: BaseModel.apply_model, args: dict):
+        # self.inner_model = model
+        c_in: dict = args["c"]
+        # x_in: Tensor = args["input_bak"] if 'input_bak' in args else args["input"]
+        x_in: Tensor = args["input"]
+        t_in: Tensor = args["timestep"]
+        cond_or_uncond = args["cond_or_uncond"]
+
+        # x_in_bak = x_in
+
+        self.w = x_in.shape[3]
+        self.h = x_in.shape[2]
+        self.init_grid_bbox(self.tile_width, self.tile_height, self.tile_overlap, self.tile_batch_size)
+        # init everything done, perform sanity check & pre-computations
+        self.init_done()
+
+        # clear buffer canvas
+        self.reset_buffer(x_in)
+        N, C, H, W = x_in.shape
+        # self.pbar = tqdm(total=(self.total_bboxes) * sampling_steps, desc=f"{self.method} Sampling: ")
+        # self.pbar = tqdm(total=len(self.batched_bboxes), desc=f"{self.method} Sampling: ")
+
+        c_crossattn = c_in['c_crossattn']
+        if 'control' in c_in:
+            control = c_in['control']
+            cond_hint_original = control.cond_hint_original
+
+        # Global sampling
+        if self.draw_background:
+            for batch_id, bboxes in enumerate(self.batched_bboxes):     # batch_id is the `Latent tile batch size`
+                # comfy.model_management.throw_exception_if_processing_interrupted()
+                if comfy.model_management.processing_interrupted(): 
+                    # self.pbar.close()
+                    return x_in
+
+                # batching
+                x_tile_list     = []
+                t_tile_list     = []
+                tcond_tile_list = []
+                icond_tile_list = []
+                vcond_tile_list = []
+                control_list = []
+                for bbox in bboxes:
+                    # print('=== batch_id',batch_id,' len bboxes',len(bboxes),'len(self.batched_bboxes)', len(self.batched_bboxes), x_in.shape,x_in[bbox.slicer].shape, bbox.slicer)
+                    x_tile_list.append(x_in[bbox.slicer])
+                    t_tile_list.append(t_in)
+                    if isinstance(c_in, dict):
+                        # tcond
+                        tcond_tile = c_crossattn #self.get_tcond(c_in)      # cond, [1, 77, 768]
+                        tcond_tile_list.append(tcond_tile)
+                        # present in sdxl
+                        if 'y' in c_in:
+                            icond=c_in['y'] # self.get_icond(c_in)
+                            if icond.shape[2:] == (self.h, self.w):
+                                icond = icond[bbox.slicer]
+                            icond_tile_list.append(icond)
+                        # # vcond:
+                        # vcond = self.get_vcond(c_in)
+                        # vcond_tile_list.append(vcond)
+                    else:
+                        print('>> [WARN] not supported, make an issue on github!!')
+                c_tile = c_in.copy()
+                x_tile      = torch.cat(x_tile_list,     dim=0)   # differs each
+                t_tile      = torch.cat(t_tile_list,     dim=0)    # just repeat
+                tcond_tile = torch.cat(tcond_tile_list, dim=0)  # just repeat
+                if 'y' in c_in:
+                    icond_tile = torch.cat(icond_tile_list, dim=0)  # differs each
+                    c_tile['y'] = icond_tile
+                c_tile['c_crossattn'] = tcond_tile
+                # vcond_tile = torch.cat(vcond_tile_list, dim=0) if None not in vcond_tile_list else None # just repeat
+
+                # controlnet
+                # self.switch_controlnet_tensors(batch_id, N, len(bboxes), is_denoise=True)
+                if 'control' in c_in:
+                    param_id = 0
+                    self.prepare_controlnet_tensors(refresh=True, tensor=control.cond_hint_original)
+                    self.switch_controlnet_tensors(batch_id, N, len(bboxes))
+                    control.cond_hint_original = self.control_tensor_batch[param_id][batch_id]
+                    c_tile['control'] = control.get_control(x_tile, t_tile, c_tile, len(cond_or_uncond))
+                    control.cond_hint_original = cond_hint_original
+                    if hasattr(control, 'cond_hint'):
+                        del control.cond_hint
+                        control.cond_hint = None
+                
+                # stablesr
+                # self.switch_stablesr_tensors(batch_id)
+
+                # denoising: here the x is the noise
+                # x_tile.batched_bboxes = self.batched_bboxes
+                # print('=== x_tile',x_tile.shape)
+                x_tile_out = model(x_tile, t_tile, **c_tile)
+
+                # de-batching
+                for i, bbox in enumerate(bboxes):
+                    # These weights can be calcluated in advance, but will cost a lot of vram 
+                    # when you have many tiles. So we calculate it here.
+                    w = self.tile_weights * self.rescale_factor[bbox.slicer]
+                    self.x_buffer[bbox.slicer] += x_tile_out[i*N:(i+1)*N, :, :, :] * w
+
+                # self.update_pbar()
+                # self.pbar.update()
+        # self.pbar.close()
+        x_out = self.x_buffer
+        return x_out
+
+
+MAX_RESOLUTION=8192
+class TiledDiffusion():
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"model": ("MODEL", ),
+                                "method": (["Mixture of Diffusers", "MultiDiffusion"], {"default": "Mixture of Diffusers"}),
+                                # "tile_width": ("INT", {"default": 96, "min": 16, "max": 256, "step": 16}),
+                                "tile_width": ("INT", {"default": 96*opt_f, "min": 16, "max": MAX_RESOLUTION, "step": 16}),
+                                # "tile_height": ("INT", {"default": 96, "min": 16, "max": 256, "step": 16}),
+                                "tile_height": ("INT", {"default": 96*opt_f, "min": 16, "max": MAX_RESOLUTION, "step": 16}),
+                                "tile_overlap": ("INT", {"default": 8*opt_f, "min": 0, "max": 256*opt_f, "step": 8}),
+                                "tile_batch_size": ("INT", {"default": 4, "min": 1, "max": 8, "step": 1}),
+                            }}
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = "_for_testing"
+
+    def apply(self, model: comfy.model_patcher.ModelPatcher, method, tile_width, tile_height, tile_overlap, tile_batch_size):
+        if method == "Mixture of Diffusers":
+            delegate = MixtureOfDiffusers()
+        else:
+            delegate = MultiDiffusion()
+        
+        # if noise_inversion:
+        #     get_cache_callback = self.noise_inverse_get_cache
+        #     set_cache_callback = None # lambda x0, xt, prompts: self.noise_inverse_set_cache(p, x0, xt, prompts, steps, retouch)
+        #     delegate.init_noise_inverse(steps, retouch, get_cache_callback, set_cache_callback, renoise_strength, renoise_kernel_size)
+
+        delegate.tile_width = tile_width // opt_f
+        delegate.tile_height = tile_height // opt_f
+        delegate.tile_overlap = tile_overlap // opt_f
+        delegate.tile_batch_size = tile_batch_size
+        # delegate.init_grid_bbox(tile_width, tile_height, tile_overlap, tile_batch_size)
+        # # init everything done, perform sanity check & pre-computations
+        # delegate.init_done()
+        # hijack the behaviours
+        # delegate.hook()
+        model = model.clone()
+        if 'model_function_wrapper' in model.model_options:
+            tmp = model.model_options.pop("model_function_wrapper", None)
+            del tmp
+        model.set_model_unet_function_wrapper(delegate.apply_model)
+        model.model_options['tiled_diffusion'] = True
+        return (model,)
+
+class NoiseInversion():
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"model": ("MODEL", ),
+                                "positive": ("CONDITIONING", ),
+                                "negative": ("CONDITIONING", ),
+                                "latent_image": ("LATENT", ),
+                                "image": ("IMAGE", ),
+                                "steps": ("INT", {"default": 10, "min": 1, "max": 208, "step": 1}),
+                                "retouch": ("FLOAT", {"default": 1, "min": 1, "max": 100, "step": 0.1}),
+                                "renoise_strength": ("FLOAT", {"default": 1, "min": 1, "max": 2, "step": 0.01}),
+                                "renoise_kernel_size": ("INT", {"default": 2, "min": 2, "max": 512, "step": 1}),
+                            }}
+    RETURN_TYPES = ("LATENT",)
+    FUNCTION = "sample"
+    CATEGORY = "sampling"
+    def sample(self, model: comfy.model_patcher.ModelPatcher, positive, negative,
+                    latent_image, image, steps, retouch, renoise_strength, renoise_kernel_size):
+        return (latent_image,)
+
+NODE_CLASS_MAPPINGS = {
+    "TiledDiffusion": TiledDiffusion,
+    "NoiseInversion": NoiseInversion,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "TiledDiffusion": "Tiled Diffusion",
+    "NoiseInversion": "Noise Inversion",
+}
