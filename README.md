@@ -4,7 +4,7 @@ See [this](https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1
 
 The extension enables **large image drawing & upscaling with limited VRAM** via the following techniques:
 
-1. Two SOTA diffusion tiling algorithms: Mixture of Diffusers and MultiDiffusion
+1. Two SOTA diffusion tiling algorithms: [Mixture of Diffusers](https://github.com/albarji/mixture-of-diffusers) and [MultiDiffusion](https://github.com/omerbt/MultiDiffusion)
 2. pkuliyi2015's Tiled VAE algorithm.
 3. ~~pkuliyi2015's TIled Noise Inversion for better upscaling.~~
 
@@ -17,7 +17,7 @@ The extension enables **large image drawing & upscaling with limited VRAM** via 
 - [ ] ~~StableSR support~~
 - [ ] Tiled Noise Inversion
 - [x] Tiled VAE
-- [x] Regional Prompt Control
+- [ ] Regional Prompt Control
 - [x] Img2img upscale
 - [x] Ultra-Large image generation
 
