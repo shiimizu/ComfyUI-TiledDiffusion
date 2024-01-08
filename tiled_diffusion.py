@@ -541,7 +541,7 @@ class TiledDiffusion():
                                 "tile_width": ("INT", {"default": 96*opt_f, "min": 16, "max": MAX_RESOLUTION, "step": 16}),
                                 # "tile_height": ("INT", {"default": 96, "min": 16, "max": 256, "step": 16}),
                                 "tile_height": ("INT", {"default": 96*opt_f, "min": 16, "max": MAX_RESOLUTION, "step": 16}),
-                                "tile_overlap": ("INT", {"default": 8*opt_f, "min": 0, "max": 256*opt_f, "step": 8}),
+                                "tile_overlap": ("INT", {"default": 8*opt_f, "min": 0, "max": 256*opt_f, "step": 4*opt_f}),
                                 "tile_batch_size": ("INT", {"default": 4, "min": 1, "max": 8, "step": 1}),
                             }}
     RETURN_TYPES = ("MODEL",)

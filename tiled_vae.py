@@ -744,7 +744,11 @@ class VAEHook:
 
         # Done!
         pbar.close()
-        return result.to(dtype=comfy.model_management.vae_dtype()) if result is not None else result_approx.to(device=device, dtype=comfy.model_management.vae_dtype())
+        if interrupted:
+            del result, result_approx
+            comfy.model_management.interrupt_current_processing()
+        vae_dtype = comfy.model_management.vae_dtype()
+        return result.to(dtype=vae_dtype) if result is not None else result_approx.to(device=device, dtype=vae_dtype)
 
 # from .tiled_vae import VAEHook, get_rcmd_enc_tsize, get_rcmd_dec_tsize
 from nodes import VAEEncode, VAEDecode
@@ -793,7 +797,7 @@ class TiledVAE:
         
         # encoder.forward = VAEHook(encoder, encoder_tile_size, is_decoder=False, **kwargs)
         # decoder.forward = VAEHook(decoder, decoder_tile_size, is_decoder=True,  **kwargs)
-        fn = VAEHook(net=decoder if is_decoder else encoder, tile_size=tile_size // 8,
+        fn = VAEHook(net=decoder if is_decoder else encoder, tile_size=tile_size // 8 if is_decoder else tile_size,
                         is_decoder=is_decoder, fast_decoder=fast, fast_encoder=fast,
                         color_fix=color_fix, to_gpu=comfy.model_management.vae_device().type != 'cpu')
         if is_decoder:
@@ -840,10 +844,10 @@ class VAEDecodeTiled_TiledDiffusion(TiledVAE):
     @classmethod
     def INPUT_TYPES(s):
         is_decoder = True
-        tile_size = get_rcmd_dec_tsize()
+        tile_size = get_rcmd_dec_tsize() * opt_f
         return {"required": {"samples": ("LATENT", ),
                                 "vae": ("VAE", ),
-                                "tile_size": ("INT", {"default": tile_size, "min": 48, "max": 4096, "step": 16}),
+                                "tile_size": ("INT", {"default": tile_size, "min": 48*opt_f, "max": 4096, "step": 16}),
                                 "fast": ("BOOLEAN", {"default": True}),
                             }}
     RETURN_TYPES = ("IMAGE",)
