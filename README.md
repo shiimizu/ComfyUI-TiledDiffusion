@@ -4,7 +4,7 @@ See [this](https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1
 
 This extension enables **large image drawing & upscaling with limited VRAM** via the following techniques:
 
-1. Two SOTA diffusion tiling algorithms: [Mixture of Diffusers](https://github.com/albarji/mixture-of-diffusers) and [MultiDiffusion](https://github.com/omerbt/MultiDiffusion)
+1. Two SOTA diffusion tiling algorithms: [Mixture of Diffusers](https://github.com/albarji/mixture-of-diffusers) <a href="https://arxiv.org/abs/2302.02412"><img width="32" alt="Mixture of Diffusers Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a> and [MultiDiffusion](https://github.com/omerbt/MultiDiffusion) <a href="https://arxiv.org/abs/2302.08113"><img width="32" alt="MultiDiffusion Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a>
 2. pkuliyi2015 & Kahsolt's Tiled VAE algorithm.
 3. ~~pkuliyi2015 & Kahsolt's TIled Noise Inversion for better upscaling.~~
 
@@ -48,8 +48,8 @@ If you have the [Math Expression](https://github.com/pythongosssss/ComfyUI-Custo
 `C` = number of columns you want  
 `R` = number of rows you want
 
-`tile_width // C`  
-`tile_height // R`
+`pixel width of input image or latent // C` = `tile_width`  
+`pixel height of input image or latent // R` = `tile_height`
 
 <img width="800" alt="Tile_arrangement" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/9952e7d8-909e-436f-a284-c00f0fb71665">
 
@@ -93,4 +93,22 @@ The following images can be loaded in ComfyUI.
   <p>4x upscale. 3 passes.</p>
 </div>
 
+## Citation
 
+```bibtex
+@article{jimenez2023mixtureofdiffusers,
+  title={Mixture of Diffusers for scene composition and high resolution image generation},
+  author={Álvaro Barbero Jiménez},
+  journal={arXiv preprint arXiv:2302.02412},
+  year={2023}
+}
+```
+
+```bibtex
+@article{bar2023multidiffusion,
+  title={MultiDiffusion: Fusing Diffusion Paths for Controlled Image Generation},
+  author={Bar-Tal, Omer and Yariv, Lior and Lipman, Yaron and Dekel, Tali},
+  journal={arXiv preprint arXiv:2302.08113},
+  year={2023}
+}
+```
