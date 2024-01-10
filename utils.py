@@ -1,127 +1,117 @@
-import torch
-from comfy import model_management
 import comfy.samplers
-from comfy.samplers import get_area_and_mult, can_concat_cond, cond_cat
+import inspect
+import importlib
+from textwrap import dedent, indent
+from copy import copy
+import types
+import functools
+import os
+import sys
+import binascii
 
-if not hasattr(comfy.samplers, 'calc_cond_uncond_batch_original'):
-    comfy.samplers.calc_cond_uncond_batch_original = comfy.samplers.calc_cond_uncond_batch
+def gen_id():
+    return binascii.hexlify(os.urandom(1024))[64:72].decode("utf-8")
+
 def hook_calc_cond_uncond_batch():
-    comfy.samplers.calc_cond_uncond_batch = calc_cond_uncond_batch
+    # this function should only be run by us
+    orig_key = f"calc_cond_uncond_batch_original_tiled_diffusion_{gen_id()}"
+    if not hasattr(comfy.samplers, orig_key):
+        setattr(comfy.samplers, orig_key, comfy.samplers.calc_cond_uncond_batch)
+    payload = [{
+        "target_line": 'control.get_control',
+        "mode": "replace",
+        "code_to_insert": """control if 'tiled_diffusion' in model_options else control.get_control"""
+    },
+    {
+        "target_line": 'calc_cond_uncond_batch',
+        "dedent": False,
+        "code_to_insert": f"""
+    if 'tiled_diffusion' not in model_options:
+        return {orig_key}(model, cond, uncond, x_in, timestep, model_options)"""
+    }]
+    fn = inject_code(comfy.samplers.calc_cond_uncond_batch, payload)
+    setattr(comfy.samplers, 'calc_cond_uncond_batch', fn)
+
 def hook_all():
     hook_calc_cond_uncond_batch()
 
-def calc_cond_uncond_batch(model, cond, uncond, x_in, timestep, model_options):
-    if 'tiled_diffusion' not in model_options:
-        return comfy.samplers.calc_cond_uncond_batch_original(model, cond, uncond, x_in, timestep, model_options)
-    out_cond = torch.zeros_like(x_in)
-    out_count = torch.ones_like(x_in) * 1e-37
+def inject_code(original_func, data):
+    # Get the source code of the original function
+    original_source = inspect.getsource(original_func)
 
-    out_uncond = torch.zeros_like(x_in)
-    out_uncond_count = torch.ones_like(x_in) * 1e-37
+    # Split the source code into lines
+    lines = original_source.split("\n")
 
-    COND = 0
-    UNCOND = 1
-
-    to_run = []
-    for x in cond:
-        p = get_area_and_mult(x, x_in, timestep)
-        if p is None:
-            continue
-
-        to_run += [(p, COND)]
-    if uncond is not None:
-        for x in uncond:
-            p = get_area_and_mult(x, x_in, timestep)
-            if p is None:
-                continue
-
-            to_run += [(p, UNCOND)]
-
-    while len(to_run) > 0:
-        first = to_run[0]
-        first_shape = first[0][0].shape
-        to_batch_temp = []
-        for x in range(len(to_run)):
-            if can_concat_cond(to_run[x][0], first[0]):
-                to_batch_temp += [x]
-
-        to_batch_temp.reverse()
-        to_batch = to_batch_temp[:1]
-
-        free_memory = model_management.get_free_memory(x_in.device)
-        for i in range(1, len(to_batch_temp) + 1):
-            batch_amount = to_batch_temp[:len(to_batch_temp)//i]
-            input_shape = [len(batch_amount) * first_shape[0]] + list(first_shape)[1:]
-            if model.memory_required(input_shape) < free_memory:
-                to_batch = batch_amount
+    for item in data:
+        # Find the line number of the target line
+        target_line_number = None
+        for i, line in enumerate(lines):
+            if item['target_line'] not in line: continue
+            target_line_number = i + 1
+            if item.get("mode","insert") == "replace":
+                lines[i] = lines[i].replace(item['target_line'], item['code_to_insert'])
                 break
 
-        input_x = []
-        mult = []
-        c = []
-        cond_or_uncond = []
-        area = []
-        control = None
-        patches = None
-        for x in to_batch:
-            o = to_run.pop(x)
-            p = o[0]
-            input_x.append(p.input_x)
-            mult.append(p.mult)
-            c.append(p.conditioning)
-            area.append(p.area)
-            cond_or_uncond.append(o[1])
-            control = p.control
-            patches = p.patches
+            # Find the indentation of the line where the new code will be inserted
+            indentation = ''
+            for char in line:
+                if char == ' ':
+                    indentation += char
+                else:
+                    break
+            
+            # Indent the new code to match the original
+            code_to_insert = item['code_to_insert']
+            if item.get("dedent",True):
+                code_to_insert = dedent(item['code_to_insert'])
+            code_to_insert = indent(code_to_insert, indentation)
 
-        batch_chunks = len(cond_or_uncond)
-        input_x = torch.cat(input_x)
-        c = cond_cat(c)
-        timestep_ = torch.cat([timestep] * batch_chunks)
+            break
 
-        if control is not None:
-            if 'tiled_diffusion' in model_options:
-                c['control'] = control
-            else:
-                c['control'] = control.get_control(input_x, timestep_, c, len(cond_or_uncond))
+        if target_line_number is None:
+            raise FileNotFoundError
+            # Target line not found, return the original function
+            # return original_func
 
-        transformer_options = {}
-        if 'transformer_options' in model_options:
-            transformer_options = model_options['transformer_options'].copy()
+        # Insert the code to be injected after the target line
+        if item.get("mode","insert") == "insert":
+            lines.insert(target_line_number, code_to_insert)
 
-        if patches is not None:
-            if "patches" in transformer_options:
-                cur_patches = transformer_options["patches"].copy()
-                for p in patches:
-                    if p in cur_patches:
-                        cur_patches[p] = cur_patches[p] + patches[p]
-                    else:
-                        cur_patches[p] = patches[p]
-            else:
-                transformer_options["patches"] = patches
+    # Recreate the modified source code
+    modified_source = "\n".join(lines)
+    modified_source = dedent(modified_source.strip("\n"))
 
-        transformer_options["cond_or_uncond"] = cond_or_uncond[:]
-        transformer_options["sigmas"] = timestep
+    # Write the modified source code to a temporary file so the
+    # source code and stack traces can still be viewed when debugging.
+    custom_name = ".patches.py"
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    temp_file_path = os.path.join(current_dir, custom_name)
+    with open(temp_file_path, 'w') as temp_file:
+        temp_file.write(modified_source)
+        temp_file.flush()
 
-        c['transformer_options'] = transformer_options
+        MODULE_PATH = temp_file.name
+        MODULE_NAME = __name__.split('.')[0] + "_patch_modules"
+        spec = importlib.util.spec_from_file_location(MODULE_NAME, MODULE_PATH)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
 
-        if 'model_function_wrapper' in model_options:
-            output = model_options['model_function_wrapper'](model.apply_model, {"input": input_x, "timestep": timestep_, "c": c, "cond_or_uncond": cond_or_uncond}).chunk(batch_chunks)
-        else:
-            output = model.apply_model(input_x, timestep_, **c).chunk(batch_chunks)
-        del input_x
+        # Retrieve the modified function from the module
+        modified_function = getattr(module, original_func.__name__)
 
-        for o in range(batch_chunks):
-            if cond_or_uncond[o] == COND:
-                out_cond[:,:,area[o][2]:area[o][0] + area[o][2],area[o][3]:area[o][1] + area[o][3]] += output[o] * mult[o]
-                out_count[:,:,area[o][2]:area[o][0] + area[o][2],area[o][3]:area[o][1] + area[o][3]] += mult[o]
-            else:
-                out_uncond[:,:,area[o][2]:area[o][0] + area[o][2],area[o][3]:area[o][1] + area[o][3]] += output[o] * mult[o]
-                out_uncond_count[:,:,area[o][2]:area[o][0] + area[o][2],area[o][3]:area[o][1] + area[o][3]] += mult[o]
-        del mult
+        # Adapted from https://stackoverflow.com/a/49077211
+        def copy_func(f, globals=None, module=None, code=None):
+            if globals is None:
+                globals = f.__globals__
+            g = types.FunctionType(f.__code__ if code is None else code, globals, name=f.__name__,
+                                argdefs=f.__defaults__, closure=f.__closure__)
+            g = functools.update_wrapper(g, f)
+            if module is not None:
+                g.__module__ = module
+            g.__kwdefaults__ = copy(f.__kwdefaults__)
+            return g
+        
+        modified_function = copy_func(original_func, code=modified_function.__code__)
 
-    out_cond /= out_count
-    del out_count
-    out_uncond /= out_uncond_count
-    del out_uncond_count
-    return out_cond, out_uncond
+    return modified_function
