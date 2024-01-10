@@ -2,6 +2,7 @@ from __future__ import division
 import torch
 from torch import Tensor
 import comfy.model_management
+from comfy.model_patcher import ModelPatcher
 import comfy.model_patcher
 from comfy.model_base import BaseModel
 from typing import List, Union, Tuple, Dict
@@ -217,14 +218,8 @@ class AbstractDiffusion:
     @controlnet
     def prepare_controlnet_tensors(self, refresh:bool=False, tensor=None):
         ''' Crop the control tensor into tiles and cache them '''
-        # if not refresh:
-        #     if self.control_tensor_batch is not None or self.control_params is not None: return
-        # if hasattr(self, 'control_tensor_batch'):
-        #     del self.control_tensor_batch
-        #     self.control_tensor_batch = None
-        # if hasattr(self, 'org_control_tensor_batch'):
-        #     del self.org_control_tensor_batch
-        #     self.org_control_tensor_batch = None
+        if not refresh:
+            if self.control_tensor_batch is not None or self.control_params is not None: return
         tensors = [tensor]
         self.org_control_tensor_batch = tensors
         self.control_tensor_batch = []
@@ -297,28 +292,22 @@ class CondDict: ...
 class MultiDiffusion(AbstractDiffusion):
     
     @torch.no_grad()
-    def apply_model(self, model: BaseModel.apply_model, args: dict):
-        # self.inner_model = model
-        c_in: dict = args["c"]
+    def __call__(self, model_function: BaseModel.apply_model, args: dict):
         x_in: Tensor = args["input"]
         t_in: Tensor = args["timestep"]
-        cond_or_uncond = args["cond_or_uncond"]
+        c_in: dict = args["c"]
+        cond_or_uncond: List = args["cond_or_uncond"]
+        c_crossattn: Tensor = c_in['c_crossattn']
 
-        self.w = x_in.shape[3]
-        self.h = x_in.shape[2]
+        N, C, H, W = x_in.shape
+        self.w = W
+        self.h = H
+
         self.init_grid_bbox(self.tile_width, self.tile_height, self.tile_overlap, self.tile_batch_size)
         # init everything done, perform sanity check & pre-computations
         self.init_done()
-
-        N, C, H, W = x_in.shape
-
         # clear buffer canvas
         self.reset_buffer(x_in)
-        c_crossattn = c_in['c_crossattn']
-        c_crossattn = c_crossattn.clone() if c_crossattn.shape[0] == 1 else c_crossattn
-        if 'control' in c_in:
-            control = c_in['control']
-            cond_hint_original = control.cond_hint_original
 
         # Background sampling (grid bbox)
         if self.draw_background:
@@ -341,22 +330,23 @@ class MultiDiffusion(AbstractDiffusion):
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
                     param_id = 0
-                    self.prepare_controlnet_tensors(refresh=True, tensor=control.cond_hint_original)
+                    control = c_in['control']
+                    cond_hint_original = control.cond_hint_original
+                    self.prepare_controlnet_tensors(refresh=True, tensor=cond_hint_original)
                     self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                     control.cond_hint_original = self.control_tensor_batch[param_id][batch_id]
                     c_tile['control'] = control.get_control(x_tile, ts_tile, c_tile, len(cond_or_uncond))
                     control.cond_hint_original = cond_hint_original
-                    if hasattr(control, 'cond_hint'):
-                        del control.cond_hint
-                        control.cond_hint = None
+                    control.cond_hint = None
 
                 # stablesr tiling
                 # self.switch_stablesr_tensors(batch_id)
 
-                x_tile_out = model(x_tile, ts_tile, **c_tile)
+                x_tile_out = model_function(x_tile, ts_tile, **c_tile)
 
                 for i, bbox in enumerate(bboxes):
                     self.x_buffer[bbox.slicer] += x_tile_out[i*N:(i+1)*N, :, :, :]
+                del x_tile_out, x_tile, ts_tile, c_tile
 
                 # update progress bar
                 # self.update_pbar()
@@ -397,32 +387,25 @@ class MixtureOfDiffusers(AbstractDiffusion):
         return self.tile_weights
 
     @torch.no_grad()
-    def apply_model(self, model: BaseModel.apply_model, args: dict):
-        # self.inner_model = model
-        c_in: dict = args["c"]
-        # x_in: Tensor = args["input_bak"] if 'input_bak' in args else args["input"]
+    def __call__(self, model_function: BaseModel.apply_model, args: dict):
         x_in: Tensor = args["input"]
         t_in: Tensor = args["timestep"]
-        cond_or_uncond = args["cond_or_uncond"]
+        c_in: dict = args["c"]
+        cond_or_uncond: List= args["cond_or_uncond"]
+        c_crossattn: Tensor = c_in['c_crossattn']
 
-        # x_in_bak = x_in
+        N, C, H, W = x_in.shape
+        self.w = W
+        self.h = H
 
-        self.w = x_in.shape[3]
-        self.h = x_in.shape[2]
         self.init_grid_bbox(self.tile_width, self.tile_height, self.tile_overlap, self.tile_batch_size)
         # init everything done, perform sanity check & pre-computations
         self.init_done()
-
         # clear buffer canvas
         self.reset_buffer(x_in)
-        N, C, H, W = x_in.shape
+
         # self.pbar = tqdm(total=(self.total_bboxes) * sampling_steps, desc=f"{self.method} Sampling: ")
         # self.pbar = tqdm(total=len(self.batched_bboxes), desc=f"{self.method} Sampling: ")
-
-        c_crossattn = c_in['c_crossattn']
-        if 'control' in c_in:
-            control = c_in['control']
-            cond_hint_original = control.cond_hint_original
 
         # Global sampling
         if self.draw_background:
@@ -460,8 +443,10 @@ class MixtureOfDiffusers(AbstractDiffusion):
                         print('>> [WARN] not supported, make an issue on github!!')
                 c_tile = c_in.copy()
                 x_tile      = torch.cat(x_tile_list,     dim=0)   # differs each
-                t_tile      = torch.cat(t_tile_list,     dim=0)    # just repeat
-                tcond_tile = torch.cat(tcond_tile_list, dim=0)  # just repeat
+                # t_tile      = torch.cat(t_tile_list,     dim=0)    # just repeat
+                # tcond_tile = torch.cat(tcond_tile_list, dim=0)  # just repeat
+                t_tile = self.repeat_tensor(t_in, len(bboxes), concat=True, concat_to=x_tile.shape[0])
+                tcond_tile = self.repeat_tensor(c_crossattn, len(bboxes), concat=True, concat_to=x_tile.shape[0])
                 if 'y' in c_in:
                     icond_tile = torch.cat(icond_tile_list, dim=0)  # differs each
                     c_tile['y'] = icond_tile
@@ -472,14 +457,14 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes), is_denoise=True)
                 if 'control' in c_in:
                     param_id = 0
-                    self.prepare_controlnet_tensors(refresh=True, tensor=control.cond_hint_original)
+                    control = c_in['control']
+                    cond_hint_original = control.cond_hint_original
+                    self.prepare_controlnet_tensors(refresh=True, tensor=cond_hint_original)
                     self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                     control.cond_hint_original = self.control_tensor_batch[param_id][batch_id]
                     c_tile['control'] = control.get_control(x_tile, t_tile, c_tile, len(cond_or_uncond))
                     control.cond_hint_original = cond_hint_original
-                    if hasattr(control, 'cond_hint'):
-                        del control.cond_hint
-                        control.cond_hint = None
+                    control.cond_hint = None
                 
                 # stablesr
                 # self.switch_stablesr_tensors(batch_id)
@@ -487,7 +472,10 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 # denoising: here the x is the noise
                 # x_tile.batched_bboxes = self.batched_bboxes
                 # print('=== x_tile',x_tile.shape)
-                x_tile_out = model(x_tile, t_tile, **c_tile)
+                if (stable_sr_model_function:=args.get("stable_sr_model_function_wrapper")) is not None:
+                    x_tile_out = stable_sr_model_function(model_function, {"input": x_tile, "timestep":t_tile,"c":c_tile, "cond_or_uncond": cond_or_uncond})
+                else:
+                    x_tile_out = model_function(x_tile, t_tile, **c_tile)
 
                 # de-batching
                 for i, bbox in enumerate(bboxes):
@@ -495,6 +483,7 @@ class MixtureOfDiffusers(AbstractDiffusion):
                     # when you have many tiles. So we calculate it here.
                     w = self.tile_weights * self.rescale_factor[bbox.slicer]
                     self.x_buffer[bbox.slicer] += x_tile_out[i*N:(i+1)*N, :, :, :] * w
+                del x_tile_out, x_tile, t_tile, c_tile
 
                 # self.update_pbar()
                 # self.pbar.update()
@@ -510,7 +499,7 @@ class TiledDiffusion():
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"model": ("MODEL", ),
-                                "method": (["Mixture of Diffusers", "MultiDiffusion"], {"default": "Mixture of Diffusers"}),
+                                "method": (["MultiDiffusion", "Mixture of Diffusers"], {"default": "Mixture of Diffusers"}),
                                 # "tile_width": ("INT", {"default": 96, "min": 16, "max": 256, "step": 16}),
                                 "tile_width": ("INT", {"default": 96*opt_f, "min": 16, "max": MAX_RESOLUTION, "step": 16}),
                                 # "tile_height": ("INT", {"default": 96, "min": 16, "max": 256, "step": 16}),
@@ -522,31 +511,28 @@ class TiledDiffusion():
     FUNCTION = "apply"
     CATEGORY = "_for_testing"
 
-    def apply(self, model: comfy.model_patcher.ModelPatcher, method, tile_width, tile_height, tile_overlap, tile_batch_size):
+    def apply(self, model: ModelPatcher, method, tile_width, tile_height, tile_overlap, tile_batch_size):
         if method == "Mixture of Diffusers":
-            delegate = MixtureOfDiffusers()
+            implement = MixtureOfDiffusers()
         else:
-            delegate = MultiDiffusion()
+            implement = MultiDiffusion()
         
         # if noise_inversion:
         #     get_cache_callback = self.noise_inverse_get_cache
         #     set_cache_callback = None # lambda x0, xt, prompts: self.noise_inverse_set_cache(p, x0, xt, prompts, steps, retouch)
-        #     delegate.init_noise_inverse(steps, retouch, get_cache_callback, set_cache_callback, renoise_strength, renoise_kernel_size)
+        #     implement.init_noise_inverse(steps, retouch, get_cache_callback, set_cache_callback, renoise_strength, renoise_kernel_size)
 
-        delegate.tile_width = tile_width // opt_f
-        delegate.tile_height = tile_height // opt_f
-        delegate.tile_overlap = tile_overlap // opt_f
-        delegate.tile_batch_size = tile_batch_size
-        # delegate.init_grid_bbox(tile_width, tile_height, tile_overlap, tile_batch_size)
+        implement.tile_width = tile_width // opt_f
+        implement.tile_height = tile_height // opt_f
+        implement.tile_overlap = tile_overlap // opt_f
+        implement.tile_batch_size = tile_batch_size
+        # implement.init_grid_bbox(tile_width, tile_height, tile_overlap, tile_batch_size)
         # # init everything done, perform sanity check & pre-computations
-        # delegate.init_done()
+        # implement.init_done()
         # hijack the behaviours
-        # delegate.hook()
+        # implement.hook()
         model = model.clone()
-        if 'model_function_wrapper' in model.model_options:
-            tmp = model.model_options.pop("model_function_wrapper", None)
-            del tmp
-        model.set_model_unet_function_wrapper(delegate.apply_model)
+        model.set_model_unet_function_wrapper(implement)
         model.model_options['tiled_diffusion'] = True
         return (model,)
 
@@ -566,7 +552,7 @@ class NoiseInversion():
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "sample"
     CATEGORY = "sampling"
-    def sample(self, model: comfy.model_patcher.ModelPatcher, positive, negative,
+    def sample(self, model: ModelPatcher, positive, negative,
                     latent_image, image, steps, retouch, renoise_strength, renoise_kernel_size):
         return (latent_image,)
 
