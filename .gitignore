@@ -163,3 +163,5 @@ backup*
 **/.DS_Store
 **/.venv
 **/.vscode
+
+.*
