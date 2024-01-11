@@ -746,7 +746,7 @@ class VAEHook:
         pbar.close()
         if interrupted:
             del result, result_approx
-            comfy.model_management.interrupt_current_processing()
+            comfy.model_management.throw_exception_if_processing_interrupted()
         vae_dtype = comfy.model_management.vae_dtype()
         return result.to(dtype=vae_dtype) if result is not None else result_approx.to(device=device, dtype=vae_dtype)
 
