@@ -80,8 +80,8 @@ class AbstractDiffusion:
         self.pbar = None
 
 
-        self.w: int = 512
-        self.h: int = 512
+        self.w: int = 0
+        self.h: int = 0
         self.tile_width: int = None
         self.tile_height: int = None
         self.tile_overlap: int = None
@@ -130,6 +130,7 @@ class AbstractDiffusion:
 
         self.draw_background: bool = True       # by default we draw major prompts in grid tiles
         self.control_tensor_cpu = False
+        self.weights = None
 
     def repeat_tensor(self, x:Tensor, n:int, concat=False, concat_to=0) -> Tensor:
         ''' repeat the tensor on it's first dim '''
@@ -168,7 +169,7 @@ class AbstractDiffusion:
     def init_grid_bbox(self, tile_w:int, tile_h:int, overlap:int, tile_bs:int):
         # if self._init_grid_bbox is not None: return
         # self._init_grid_bbox = True
-        self.weights: Tensor = torch.zeros((1, 1, self.h, self.w), device=devices.device, dtype=torch.float32)
+        self.weights = torch.zeros((1, 1, self.h, self.w), device=devices.device, dtype=torch.float32)
         self.enable_grid_bbox = True
 
         self.tile_w = min(tile_w, self.w)
@@ -254,9 +255,10 @@ class AbstractDiffusion:
     def switch_controlnet_tensors(self, batch_id:int, x_batch_size:int, tile_batch_size:int, is_denoise=False):
         # if not self.enable_controlnet: return
         if self.control_tensor_batch is None: return
-        self.control_params = [0]
+        # self.control_params = [0]
 
-        for param_id in range(len(self.control_params)):
+        # for param_id in range(len(self.control_params)):
+        for param_id in range(len(self.control_tensor_batch)):
             # tensor that was concatenated in `prepare_controlnet_tensors`
             control_tile = self.control_tensor_batch[param_id][batch_id]
             # broadcast to latent batch size
@@ -300,12 +302,13 @@ class MultiDiffusion(AbstractDiffusion):
         c_crossattn: Tensor = c_in['c_crossattn']
 
         N, C, H, W = x_in.shape
-        self.w = W
-        self.h = H
 
-        self.init_grid_bbox(self.tile_width, self.tile_height, self.tile_overlap, self.tile_batch_size)
-        # init everything done, perform sanity check & pre-computations
-        self.init_done()
+        if self.weights is None or self.w != W or self.h != H:
+            self.w, self.h = W, H
+            self.init_grid_bbox(self.tile_width, self.tile_height, self.tile_overlap, self.tile_batch_size)
+            # init everything done, perform sanity check & pre-computations
+            self.init_done()
+        self.w, self.h = W, H
         # clear buffer canvas
         self.reset_buffer(x_in)
 
@@ -322,19 +325,18 @@ class MultiDiffusion(AbstractDiffusion):
                 ts_tile = self.repeat_tensor(t_in, n_rep)
                 cond_tile = self.repeat_tensor(c_crossattn, n_rep)
                 c_tile = c_in.copy()
-                c_tile['c_crossattn'] = cond_tile
                 if 'y' in c_tile:
                     c_tile['y'] = self.repeat_tensor(c_tile['y'], n_rep)
+                c_tile['c_crossattn'] = cond_tile
 
                 # controlnet tiling
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
-                    param_id = 0
                     control = c_in['control']
-                    cond_hint_original = control.cond_hint_original
-                    self.prepare_controlnet_tensors(refresh=True, tensor=cond_hint_original)
-                    self.switch_controlnet_tensors(batch_id, N, len(bboxes))
-                    control.cond_hint_original = self.control_tensor_batch[param_id][batch_id]
+                    cond_hint_original: Tensor = control.cond_hint_original
+                    c2=self.repeat_tensor(cond_hint_original, ceildiv(x_in.shape[0], cond_hint_original.shape[0]))[:x_in.shape[0]]
+                    cond_hint_original2 = torch.cat([c2[:, :, bbox[1]*opt_f:bbox[3]*opt_f, bbox[0]*opt_f:bbox[2]*opt_f] for bbox in bboxes], dim=0)
+                    control.cond_hint_original = cond_hint_original2
                     c_tile['control'] = control.get_control(x_tile, ts_tile, c_tile, len(cond_or_uncond))
                     control.cond_hint_original = cond_hint_original
                     control.cond_hint = None
@@ -395,12 +397,13 @@ class MixtureOfDiffusers(AbstractDiffusion):
         c_crossattn: Tensor = c_in['c_crossattn']
 
         N, C, H, W = x_in.shape
-        self.w = W
-        self.h = H
 
-        self.init_grid_bbox(self.tile_width, self.tile_height, self.tile_overlap, self.tile_batch_size)
-        # init everything done, perform sanity check & pre-computations
-        self.init_done()
+        if self.weights is None or self.w != W or self.h != H:
+            self.w, self.h = W, H
+            self.init_grid_bbox(self.tile_width, self.tile_height, self.tile_overlap, self.tile_batch_size)
+            # init everything done, perform sanity check & pre-computations
+            self.init_done()
+        self.w, self.h = W, H
         # clear buffer canvas
         self.reset_buffer(x_in)
 
@@ -410,7 +413,6 @@ class MixtureOfDiffusers(AbstractDiffusion):
         # Global sampling
         if self.draw_background:
             for batch_id, bboxes in enumerate(self.batched_bboxes):     # batch_id is the `Latent tile batch size`
-                # comfy.model_management.throw_exception_if_processing_interrupted()
                 if comfy.model_management.processing_interrupted(): 
                     # self.pbar.close()
                     return x_in
@@ -423,13 +425,12 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 vcond_tile_list = []
                 control_list = []
                 for bbox in bboxes:
-                    # print('=== batch_id',batch_id,' len bboxes',len(bboxes),'len(self.batched_bboxes)', len(self.batched_bboxes), x_in.shape,x_in[bbox.slicer].shape, bbox.slicer)
                     x_tile_list.append(x_in[bbox.slicer])
                     t_tile_list.append(t_in)
                     if isinstance(c_in, dict):
                         # tcond
-                        tcond_tile = c_crossattn #self.get_tcond(c_in)      # cond, [1, 77, 768]
-                        tcond_tile_list.append(tcond_tile)
+                        # tcond_tile = c_crossattn #self.get_tcond(c_in)      # cond, [1, 77, 768]
+                        # tcond_tile_list.append(tcond_tile)
                         # present in sdxl
                         if 'y' in c_in:
                             icond=c_in['y'] # self.get_icond(c_in)
@@ -441,12 +442,11 @@ class MixtureOfDiffusers(AbstractDiffusion):
                         # vcond_tile_list.append(vcond)
                     else:
                         print('>> [WARN] not supported, make an issue on github!!')
+                n_rep = len(bboxes)
+                x_tile      = torch.cat(x_tile_list,     dim=0)          # differs each
+                t_tile      = self.repeat_tensor(t_in, n_rep)           # just repeat
+                tcond_tile = self.repeat_tensor(c_crossattn, n_rep) # just repeat
                 c_tile = c_in.copy()
-                x_tile      = torch.cat(x_tile_list,     dim=0)   # differs each
-                # t_tile      = torch.cat(t_tile_list,     dim=0)    # just repeat
-                # tcond_tile = torch.cat(tcond_tile_list, dim=0)  # just repeat
-                t_tile = self.repeat_tensor(t_in, len(bboxes), concat=True, concat_to=x_tile.shape[0])
-                tcond_tile = self.repeat_tensor(c_crossattn, len(bboxes), concat=True, concat_to=x_tile.shape[0])
                 if 'y' in c_in:
                     icond_tile = torch.cat(icond_tile_list, dim=0)  # differs each
                     c_tile['y'] = icond_tile
@@ -456,12 +456,11 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 # controlnet
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes), is_denoise=True)
                 if 'control' in c_in:
-                    param_id = 0
                     control = c_in['control']
                     cond_hint_original = control.cond_hint_original
-                    self.prepare_controlnet_tensors(refresh=True, tensor=cond_hint_original)
-                    self.switch_controlnet_tensors(batch_id, N, len(bboxes))
-                    control.cond_hint_original = self.control_tensor_batch[param_id][batch_id]
+                    c2=self.repeat_tensor(cond_hint_original, ceildiv(x_in.shape[0], cond_hint_original.shape[0]))[:x_in.shape[0]]
+                    cond_hint_original2 = torch.cat([c2[:, :, bbox[1]*opt_f:bbox[3]*opt_f, bbox[0]*opt_f:bbox[2]*opt_f] for bbox in bboxes], dim=0)
+                    control.cond_hint_original = cond_hint_original2
                     c_tile['control'] = control.get_control(x_tile, t_tile, c_tile, len(cond_or_uncond))
                     control.cond_hint_original = cond_hint_original
                     control.cond_hint = None
