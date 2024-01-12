@@ -29,10 +29,10 @@ def hook_calc_cond_uncond_batch():
     }]
     fn = inject_code(comfy.samplers.calc_cond_uncond_batch, payload)
     for m in sys.modules.keys():
-        if 'samplers' in m and 'extra_samplers' not in m:
+        if 'comfy.samplers' == m or (os.name != 'nt' and m.endswith('comfy/samplers')) or (os.name == 'nt' and m.endswith("comfy\\samplers")):
             if not hasattr(sys.modules[m], orig_key):
-                calc_cond_uncond_batch = getattr(sys.modules[m], 'calc_cond_uncond_batch')
-                setattr(sys.modules[m], orig_key, calc_cond_uncond_batch)
+                if (calc_cond_uncond_batch:=getattr(sys.modules[m], 'calc_cond_uncond_batch', None)) is not None:
+                    setattr(sys.modules[m], orig_key, calc_cond_uncond_batch)
             setattr(sys.modules[m], 'calc_cond_uncond_batch', fn)
 
 def hook_sag_create_blur_map():
@@ -61,7 +61,7 @@ def hook_sag_create_blur_map():
     modified_source = re.sub(r"ratio =.*\s+mid_shape =.*", replace_str, source, flags=re.MULTILINE)
     fn = write_to_file_and_return_fn(nodes_sag.create_blur_map, modified_source, 'a')
     for m in sys.modules.keys():
-        if 'nodes_sag' in m:
+        if 'comfy_extras.nodes_sag' == m or (os.name != 'nt' and m.endswith("comfy_extras/nodes_sag")) or (os.name == 'nt' and m.endswith("comfy_extras\\nodes_sag")):
             setattr(sys.modules[m], 'create_blur_map', fn)
 
 
