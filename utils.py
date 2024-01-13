@@ -7,12 +7,16 @@ import functools
 import os
 import sys
 import binascii
+from collections import namedtuple
+from typing import List
+
+Hook = namedtuple('Hook', ['fn', 'orig_key', 'module_name', 'module_name_nt', 'module_name_unix'])
 
 def gen_id():
     return binascii.hexlify(os.urandom(1024))[64:72].decode("utf-8")
 
 def hook_calc_cond_uncond_batch():
-    import comfy.samplers
+    from comfy.samplers import calc_cond_uncond_batch
     # this function should only be run by us
     orig_key = f"calc_cond_uncond_batch_original_tiled_diffusion_{gen_id()}"
     payload = [{
@@ -27,20 +31,14 @@ def hook_calc_cond_uncond_batch():
     if 'tiled_diffusion' not in model_options:
         return {orig_key}(model, cond, uncond, x_in, timestep, model_options)"""
     }]
-    fn = inject_code(comfy.samplers.calc_cond_uncond_batch, payload)
-    for m in sys.modules.keys():
-        if 'comfy.samplers' == m or (os.name != 'nt' and m.endswith('comfy/samplers')) or (os.name == 'nt' and m.endswith("comfy\\samplers")):
-            if not hasattr(sys.modules[m], orig_key):
-                if (calc_cond_uncond_batch:=getattr(sys.modules[m], 'calc_cond_uncond_batch', None)) is not None:
-                    setattr(sys.modules[m], orig_key, calc_cond_uncond_batch)
-            setattr(sys.modules[m], 'calc_cond_uncond_batch', fn)
+    fn = inject_code(calc_cond_uncond_batch, payload)
+    return create_hook(fn, 'comfy.samplers', orig_key)
 
 def hook_sag_create_blur_map():
     imported = False
     try:
         import comfy_extras
-        if hasattr(comfy_extras, 'nodes_sag'):
-            from comfy_extras import nodes_sag
+        from comfy_extras import nodes_sag
         imported = True
     except: ...
     if not imported: return
@@ -60,14 +58,41 @@ def hook_sag_create_blur_map():
     mid_shape = mh, mw"""
     modified_source = re.sub(r"ratio =.*\s+mid_shape =.*", replace_str, source, flags=re.MULTILINE)
     fn = write_to_file_and_return_fn(nodes_sag.create_blur_map, modified_source, 'a')
-    for m in sys.modules.keys():
-        if 'comfy_extras.nodes_sag' == m or (os.name != 'nt' and m.endswith("comfy_extras/nodes_sag")) or (os.name == 'nt' and m.endswith("comfy_extras\\nodes_sag")):
-            setattr(sys.modules[m], 'create_blur_map', fn)
+    return create_hook(fn, 'comfy_extras.nodes_sag')
+
+def hook_samplers_pre_run_control():
+    from comfy.samplers import pre_run_control
+    payload = [{
+        "dedent": False,
+        "target_line": "if 'control' in x:",
+        "code_to_insert": """    x['control'].cleanup()"""
+    }]
+    fn = inject_code(pre_run_control, payload, 'a')
+    return create_hook(fn, 'comfy.samplers')
+
+def create_hook(fn, module_name, orig_key = None):
+    if orig_key is None: orig_key = f'{fn.__name__}_original'
+    module_name_nt = '\\'.join(module_name.split('.'))
+    module_name_unix = '/'.join(module_name.split('.'))
+    return Hook(fn, orig_key, module_name, module_name_nt, module_name_unix)
 
 
 def hook_all():
-    hook_calc_cond_uncond_batch()
-    hook_sag_create_blur_map()
+    hooks: List[Hook] = [
+        hook_calc_cond_uncond_batch(),
+        hook_sag_create_blur_map(),
+        hook_samplers_pre_run_control(),
+    ]
+
+    for m in sys.modules.keys():
+        for hook in hooks:
+            if hook.module_name == m or (os.name != 'nt' and m.endswith(hook.module_name_unix)) or (os.name == 'nt' and m.endswith(hook.module_name_nt)):
+                if hasattr(sys.modules[m], hook.fn.__name__):
+                    if not hasattr(sys.modules[m], hook.orig_key):
+                        if (orig_fn:=getattr(sys.modules[m], hook.fn.__name__, None)) is not None:
+                            setattr(sys.modules[m], hook.orig_key, orig_fn)
+                    setattr(sys.modules[m], hook.fn.__name__, hook.fn)
+
 
 def inject_code(original_func, data, mode='w'):
     # Get the source code of the original function
