@@ -65,7 +65,7 @@ def hook_samplers_pre_run_control():
     payload = [{
         "dedent": False,
         "target_line": "if 'control' in x:",
-        "code_to_insert": """    x['control'].cleanup()"""
+        "code_to_insert": """    try: x['control'].cleanup()\n    except: ..."""
     }]
     fn = inject_code(pre_run_control, payload, 'a')
     return create_hook(fn, 'comfy.samplers')
