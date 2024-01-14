@@ -292,8 +292,8 @@ class AbstractDiffusion:
             if len(self.batched_bboxes) >= len(self.control_tensor_batch[param_id]):
                 self.control_tensor_batch[param_id].extend([[] for _ in range(len(self.batched_bboxes))])
 
-            # if statement: eager eval
-            if self.refresh or control.cond_hint is None or isinstance(self.control_tensor_batch[param_id][batch_id], list):
+            # if statement: eager eval, first time when cond_hint is None. 
+            if self.refresh or control.cond_hint is None or not isinstance(self.control_tensor_batch[param_id][batch_id], Tensor):
                 if isinstance(control, ControlNet):
                     dtype = control.manual_cast_dtype if control.manual_cast_dtype is not None else control.control_model.dtype
                     control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', 'center').to(dtype).to(control.device)
@@ -302,19 +302,19 @@ class AbstractDiffusion:
                     control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, width, height, 'nearest-exact', "center").float().to(control.device)
                     if control.channels_in == 1 and control.cond_hint.shape[1] > 1:
                         control.cond_hint = torch.mean(control.cond_hint, 1, keepdim=True)
-            else:
-                tmp = self.control_tensor_batch[param_id][batch_id]
-                control.cond_hint = tmp
-
-            # Broadcast then tile
-            if batch_size * len(bboxes) != control.cond_hint.shape[0]:
-                if control.cond_hint.shape[0] < batch_size:
-                    c2=self.repeat_tensor(control.cond_hint, ceildiv(batch_size, control.cond_hint.shape[0]))[:batch_size]
-                else:
-                    c2 = control.cond_hint
-                cns = [c2[:, :, bbox[1]*opt_f:bbox[3]*opt_f, bbox[0]*opt_f:bbox[2]*opt_f] for bbox in bboxes]
+                
+                # Broadcast then tile
+                #
+                # Below can be in the parent's if clause because self.refresh will trigger on resolution change, e.g. cause of ConditioningSetArea
+                # so that particular case isn't cached atm.
+                cond_hint_pre_tile = control.cond_hint
+                if control.cond_hint.shape[0] < batch_size :
+                    cond_hint_pre_tile = self.repeat_tensor(control.cond_hint, ceildiv(batch_size, control.cond_hint.shape[0]))[:batch_size]
+                cns = [cond_hint_pre_tile[:, :, bbox[1]*opt_f:bbox[3]*opt_f, bbox[0]*opt_f:bbox[2]*opt_f] for bbox in bboxes]
                 control.cond_hint = torch.cat(cns, dim=0)
                 self.control_tensor_batch[param_id][batch_id]=control.cond_hint
+            else:
+                control.cond_hint = self.control_tensor_batch[param_id][batch_id]
             control = control.previous_controlnet
             param_id += 1
 
