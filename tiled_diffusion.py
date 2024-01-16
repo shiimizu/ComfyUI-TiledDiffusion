@@ -373,9 +373,10 @@ class MultiDiffusion(AbstractDiffusion):
                 ts_tile = self.repeat_tensor(t_in, n_rep)
                 cond_tile = self.repeat_tensor(c_crossattn, n_rep)
                 c_tile = c_in.copy()
-                if 'y' in c_tile:
-                    c_tile['y'] = self.repeat_tensor(c_tile['y'], n_rep)
                 c_tile['c_crossattn'] = cond_tile
+                for key in ['y', 'c_concat']:
+                    if key in c_tile:
+                        c_tile[key] = self.repeat_tensor(c_tile[key], n_rep)
 
                 # controlnet tiling
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
@@ -466,10 +467,11 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 # batching
                 x_tile_list     = []
                 t_tile_list     = []
-                tcond_tile_list = []
-                icond_tile_list = []
-                vcond_tile_list = []
-                control_list = []
+                icond_map = {}
+                # tcond_tile_list = []
+                # icond_tile_list = []
+                # vcond_tile_list = []
+                # control_list = []
                 for bbox in bboxes:
                     x_tile_list.append(x_in[bbox.slicer])
                     t_tile_list.append(t_in)
@@ -478,11 +480,14 @@ class MixtureOfDiffusers(AbstractDiffusion):
                         # tcond_tile = c_crossattn #self.get_tcond(c_in)      # cond, [1, 77, 768]
                         # tcond_tile_list.append(tcond_tile)
                         # present in sdxl
-                        if 'y' in c_in:
-                            icond=c_in['y'] # self.get_icond(c_in)
-                            if icond.shape[2:] == (self.h, self.w):
-                                icond = icond[bbox.slicer]
-                            icond_tile_list.append(icond)
+                        for key in ['y', 'c_concat']:
+                            if key in c_in:
+                                icond=c_in[key] # self.get_icond(c_in)
+                                if icond.shape[2:] == (self.h, self.w):
+                                    icond = icond[bbox.slicer]
+                                if icond_map.get(key, None) is None:
+                                    icond_map[key] = []
+                                icond_map[key].append(icond)
                         # # vcond:
                         # vcond = self.get_vcond(c_in)
                         # vcond_tile_list.append(vcond)
@@ -493,10 +498,11 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 t_tile      = self.repeat_tensor(t_in, n_rep)           # just repeat
                 tcond_tile = self.repeat_tensor(c_crossattn, n_rep) # just repeat
                 c_tile = c_in.copy()
-                if 'y' in c_in:
-                    icond_tile = torch.cat(icond_tile_list, dim=0)  # differs each
-                    c_tile['y'] = icond_tile
                 c_tile['c_crossattn'] = tcond_tile
+                for key in ['y', 'c_concat']:
+                    if key in c_in:
+                        icond_tile = torch.cat(icond_map[key], dim=0)  # differs each
+                        c_tile[key] = icond_tile
                 # vcond_tile = torch.cat(vcond_tile_list, dim=0) if None not in vcond_tile_list else None # just repeat
 
                 # controlnet
