@@ -374,6 +374,8 @@ class MultiDiffusion(AbstractDiffusion):
                 cond_tile = self.repeat_tensor(c_crossattn, n_rep)
                 c_tile = c_in.copy()
                 c_tile['c_crossattn'] = cond_tile
+                if 'time_context' in c_in:
+                    c_tile['time_context'] = self.repeat_tensor(c_in['time_context'], n_rep)
                 for key in ['y', 'c_concat']:
                     if key in c_tile:
                         c_tile[key] = self.repeat_tensor(c_tile[key], n_rep)
@@ -499,6 +501,8 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 tcond_tile = self.repeat_tensor(c_crossattn, n_rep) # just repeat
                 c_tile = c_in.copy()
                 c_tile['c_crossattn'] = tcond_tile
+                if 'time_context' in c_in:
+                    c_tile['time_context'] = self.repeat_tensor(c_in['time_context'], n_rep) # just repeat
                 for key in ['y', 'c_concat']:
                     if key in c_in:
                         icond_tile = torch.cat(icond_map[key], dim=0)  # differs each
