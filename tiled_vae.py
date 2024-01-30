@@ -825,13 +825,13 @@ class TiledVAE:
 class VAEEncodeTiled_TiledDiffusion(TiledVAE):
     @classmethod
     def INPUT_TYPES(s):
-        is_decoder = False
+        fast = True
         tile_size = get_rcmd_enc_tsize()
         return {"required": {"pixels": ("IMAGE", ),
                                 "vae": ("VAE", ),
                                 "tile_size": ("INT", {"default": tile_size, "min": 256, "max": 4096, "step": 16}),
-                                "fast": ("BOOLEAN", {"default": True}),
-                                "color_fix": ("BOOLEAN", {"default": False}),
+                                "fast": ("BOOLEAN", {"default": fast}),
+                                "color_fix": ("BOOLEAN", {"default": fast}),
                             }}
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "process"
@@ -844,7 +844,6 @@ class VAEEncodeTiled_TiledDiffusion(TiledVAE):
 class VAEDecodeTiled_TiledDiffusion(TiledVAE):
     @classmethod
     def INPUT_TYPES(s):
-        is_decoder = True
         tile_size = get_rcmd_dec_tsize() * opt_f
         return {"required": {"samples": ("LATENT", ),
                                 "vae": ("VAE", ),
