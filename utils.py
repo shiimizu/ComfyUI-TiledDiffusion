@@ -82,8 +82,8 @@ def hook_samplers_pre_run_control():
             i += 1
         return None
     from comfy.model_patcher import ModelPatcher
-    if (model:=find_outer_instance('model', ModelPatcher)) is not None:
-        if (model_function_wrapper:=model.model_options.get('model_function_wrapper', None)) is not None:
+    if (_model:=find_outer_instance('model', ModelPatcher)) is not None:
+        if (model_function_wrapper:=_model.model_options.get('model_function_wrapper', None)) is not None:
             import sys
             tiled_diffusion = sys.modules.get('ComfyUI-TiledDiffusion.tiled_diffusion', None)
             if tiled_diffusion is None:
