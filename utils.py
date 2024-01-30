@@ -66,7 +66,35 @@ def hook_samplers_pre_run_control():
         "dedent": False,
         "target_line": "if 'control' in x:",
         "code_to_insert": """    try: x['control'].cleanup()\n    except: ..."""
-    }]
+    },  
+    {
+    "target_line": "s = model.model_sampling",
+    "code_to_insert": """
+    def find_outer_instance(target:str, target_type):
+        import inspect
+        frame = inspect.currentframe()
+        i = 0
+        while frame and i < 7:
+            if (found:=frame.f_locals.get(target, None)) is not None:
+                if isinstance(found, target_type):
+                    return found
+            frame = frame.f_back
+            i += 1
+        return None
+    from comfy.model_patcher import ModelPatcher
+    if (model:=find_outer_instance('model', ModelPatcher)) is not None:
+        if (model_function_wrapper:=model.model_options.get('model_function_wrapper', None)) is not None:
+            import sys
+            tiled_diffusion = sys.modules.get('ComfyUI-TiledDiffusion.tiled_diffusion', None)
+            if tiled_diffusion is None:
+                for key in sys.modules:
+                    if 'tiled_diffusion' in key:
+                        tiled_diffusion = sys.modules[key]
+                        break
+            if (AbstractDiffusion:=getattr(tiled_diffusion, 'AbstractDiffusion', None)) is not None:
+                if isinstance(model_function_wrapper, AbstractDiffusion):
+                    model_function_wrapper.reset()
+    """}]
     fn = inject_code(pre_run_control, payload, 'a')
     return create_hook(fn, 'comfy.samplers')
 

@@ -138,6 +138,17 @@ class AbstractDiffusion:
         self.weights = None
         self.imagescale = ImageScale()
 
+    def reset(self):
+        tile_width = self.tile_width
+        tile_height = self.tile_height
+        tile_overlap = self.tile_overlap
+        tile_batch_size = self.tile_batch_size
+        self.__init__()
+        self.tile_width = tile_width
+        self.tile_height = tile_height
+        self.tile_overlap = tile_overlap
+        self.tile_batch_size = tile_batch_size
+
     def repeat_tensor(self, x:Tensor, n:int, concat=False, concat_to=0) -> Tensor:
         ''' repeat the tensor on it's first dim '''
         if n == 1: return x
@@ -292,11 +303,11 @@ class AbstractDiffusion:
             if len(self.batched_bboxes) >= len(self.control_tensor_batch[param_id]):
                 self.control_tensor_batch[param_id].extend([[] for _ in range(len(self.batched_bboxes))])
 
-            # if statement: eager eval, first time when cond_hint is None. 
+            # if statement: eager eval. first time when cond_hint is None. 
             if self.refresh or control.cond_hint is None or not isinstance(self.control_tensor_batch[param_id][batch_id], Tensor):
                 if isinstance(control, ControlNet):
                     dtype = control.manual_cast_dtype if control.manual_cast_dtype is not None else control.control_model.dtype
-                    control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', 'center').to(dtype).to(control.device)
+                    control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', 'center').to(dtype=dtype, device=control.device)
                 elif isinstance(control, T2IAdapter):
                     width, height = control.scale_image_to(PW, PH)
                     control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, width, height, 'nearest-exact', "center").float().to(control.device)
