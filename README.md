@@ -1,6 +1,6 @@
 # Tiled Diffusion & VAE for ComfyUI
 
-See [this](https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1111/) for more information.
+Check out the [SD-WebUI extension](https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1111/) for more information.
 
 This extension enables **large image drawing & upscaling with limited VRAM** via the following techniques:
 
@@ -16,7 +16,7 @@ This extension enables **large image drawing & upscaling with limited VRAM** via
 - [x] SDXL model support
 - [x] ControlNet support
 - [ ] ~~StableSR support~~
-- [ ] Tiled Noise Inversion
+- [ ] ~~Tiled Noise Inversion~~
 - [x] Tiled VAE
 - [ ] Regional Prompt Control
 - [x] Img2img upscale

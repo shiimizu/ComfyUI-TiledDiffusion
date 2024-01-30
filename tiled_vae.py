@@ -44,7 +44,8 @@
 #   @Date: 2023-03-02
 #   @License: CC BY-NC-SA 4.0
 #
-#   Please give me a star if you like this project!
+#   Please give https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1111
+#   a star if you like the project!
 #
 # -------------------------------------------------------------------------
 '''
