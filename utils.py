@@ -98,6 +98,18 @@ def hook_samplers_pre_run_control():
     fn = inject_code(pre_run_control, payload)
     return create_hook(fn, 'comfy.samplers')
 
+def hook_gligen__set_position():
+    from comfy.gligen import Gligen
+    payload = [{
+    "target_line": "module = self.module_list[key]",
+    "code_to_insert": """
+    nonlocal objs
+    if x.shape[0] > objs.shape[0]:
+        objs = objs.repeat(-(x.shape[0] // -objs.shape[0]),1,1)
+    """}]
+    fn = inject_code(Gligen._set_position, payload, 'a')
+    return create_hook(fn, 'comfy.gligen', 'Gligen._set_position', 'Gligen._set_position')
+
 def create_hook(fn, module_name:str, target = None, orig_key = None):
     if target is None: target = fn.__name__
     if orig_key is None: orig_key = f'{target}_original'
@@ -131,6 +143,7 @@ def hook_all(restore=False, hooks=None):
             hook_calc_cond_uncond_batch(),
             hook_sag_create_blur_map(),
             hook_samplers_pre_run_control(),
+            hook_gligen__set_position(),
         ]
     for m in sys.modules:
         for hook in hooks:

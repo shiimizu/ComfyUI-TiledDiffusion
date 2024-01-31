@@ -22,8 +22,6 @@ This extension enables **large image drawing & upscaling with limited VRAM** via
 - [x] Img2img upscale
 - [x] Ultra-Large image generation
 
-Some conditioning nodes like SetArea or GLIGEN aren't working at the moment.
-
 ## Tiled Diffusion
 
 <div align="center">
@@ -35,7 +33,7 @@ Some conditioning nodes like SetArea or GLIGEN aren't working at the moment.
 
 | Name              | Description                                                  |
 |-------------------|--------------------------------------------------------------|
-| `method`          | Tiling strategy. `MultiDiffusion` or `Mixture of Diffusers`. |
+| `method`          | Tiling [strategy](https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1111/blob/fbb24736c9bc374c7f098f82b575fcd14a73936a/scripts/tilediffusion.py#L39-L46). `MultiDiffusion` or `Mixture of Diffusers`. |
 | `tile_width`      | Tile's width                                                 |
 | `tile_height`     | Tile's height                                                |
 | `tile_overlap`    | Tile's overlap                                               |
