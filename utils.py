@@ -100,14 +100,16 @@ def hook_samplers_pre_run_control():
 
 def hook_gligen__set_position():
     from comfy.gligen import Gligen
-    payload = [{
-    "target_line": "module = self.module_list[key]",
-    "code_to_insert": """
-    nonlocal objs
-    if x.shape[0] > objs.shape[0]:
-        objs = objs.repeat(-(x.shape[0] // -objs.shape[0]),1,1)
-    """}]
-    fn = inject_code(Gligen._set_position, payload, 'a')
+    source=inspect.getsource(Gligen._set_position)
+    replace_str="""
+            nonlocal objs
+            if x.shape[0] > objs.shape[0]:
+                _objs = objs.repeat(-(x.shape[0] // -objs.shape[0]),1,1)
+            else:
+                _objs = objs
+            return module(x, _objs)"""
+    modified_source = dedent(source.replace("    return module(x, objs)", replace_str, 1))
+    fn = write_to_file_and_return_fn(Gligen._set_position, modified_source)
     return create_hook(fn, 'comfy.gligen', 'Gligen._set_position')
 
 def create_hook(fn, module_name:str, target = None, orig_key = None):
