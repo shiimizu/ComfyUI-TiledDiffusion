@@ -32,7 +32,7 @@ def hook_calc_cond_uncond_batch():
         return {orig_key}(model, cond, uncond, x_in, timestep, model_options)"""
     }]
     fn = inject_code(calc_cond_uncond_batch, payload, 'w')
-    return create_hook(fn, 'comfy.samplers', orig_key)
+    return create_hook(fn, 'comfy.samplers', orig_key=orig_key)
 
 def hook_sag_create_blur_map():
     imported = False
@@ -108,7 +108,7 @@ def hook_gligen__set_position():
         objs = objs.repeat(-(x.shape[0] // -objs.shape[0]),1,1)
     """}]
     fn = inject_code(Gligen._set_position, payload, 'a')
-    return create_hook(fn, 'comfy.gligen', 'Gligen._set_position', 'Gligen._set_position')
+    return create_hook(fn, 'comfy.gligen', 'Gligen._set_position')
 
 def create_hook(fn, module_name:str, target = None, orig_key = None):
     if target is None: target = fn.__name__
