@@ -10,7 +10,7 @@ import binascii
 from collections import namedtuple
 from typing import List
 
-Hook = namedtuple('Hook', ['fn', 'orig_key', 'module_name', 'module_name_nt', 'module_name_unix'])
+Hook = namedtuple('Hook', ['fn', 'module_name', 'target', 'orig_key', 'module_name_path'])
 
 def gen_id():
     return binascii.hexlify(os.urandom(1024))[64:72].decode("utf-8")
@@ -31,7 +31,7 @@ def hook_calc_cond_uncond_batch():
     if 'tiled_diffusion' not in model_options:
         return {orig_key}(model, cond, uncond, x_in, timestep, model_options)"""
     }]
-    fn = inject_code(calc_cond_uncond_batch, payload)
+    fn = inject_code(calc_cond_uncond_batch, payload, 'w')
     return create_hook(fn, 'comfy.samplers', orig_key)
 
 def hook_sag_create_blur_map():
@@ -57,7 +57,7 @@ def hook_sag_create_blur_map():
     mw = m[1] if mh == m[0] else m[0]
     mid_shape = mh, mw"""
     modified_source = re.sub(r"ratio =.*\s+mid_shape =.*", replace_str, source, flags=re.MULTILINE)
-    fn = write_to_file_and_return_fn(nodes_sag.create_blur_map, modified_source, 'a')
+    fn = write_to_file_and_return_fn(nodes_sag.create_blur_map, modified_source)
     return create_hook(fn, 'comfy_extras.nodes_sag')
 
 def hook_samplers_pre_run_control():
@@ -95,34 +95,56 @@ def hook_samplers_pre_run_control():
                 if isinstance(model_function_wrapper, AbstractDiffusion):
                     model_function_wrapper.reset()
     """}]
-    fn = inject_code(pre_run_control, payload, 'a')
+    fn = inject_code(pre_run_control, payload)
     return create_hook(fn, 'comfy.samplers')
 
-def create_hook(fn, module_name, orig_key = None):
-    if orig_key is None: orig_key = f'{fn.__name__}_original'
-    module_name_nt = '\\'.join(module_name.split('.'))
-    module_name_unix = '/'.join(module_name.split('.'))
-    return Hook(fn, orig_key, module_name, module_name_nt, module_name_unix)
+def create_hook(fn, module_name:str, target = None, orig_key = None):
+    if target is None: target = fn.__name__
+    if orig_key is None: orig_key = f'{target}_original'
+    module_name_path = os.path.normpath(module_name.replace('.', '/'))
+    return Hook(fn, module_name, target, orig_key, module_name_path)
 
+def _getattr(obj, name:str, default=None):
+    """multi-level getattr"""
+    for attr in name.split('.'):
+        obj = getattr(obj, attr, default)
+    return obj
 
-def hook_all():
-    hooks: List[Hook] = [
-        hook_calc_cond_uncond_batch(),
-        hook_sag_create_blur_map(),
-        hook_samplers_pre_run_control(),
-    ]
+def _hasattr(obj, name:str):
+    """multi-level hasattr"""
+    return _getattr(obj, name) is not None
 
-    for m in sys.modules.keys():
+def _setattr(obj, name:str, value=None):
+    """multi-level setattr"""
+    split = name.split('.')
+    if not split[:-1]:
+        return setattr(obj, name, value)
+    else:
+        name = split[-1]
+        for attr in split[:-1]:
+            obj = getattr(obj, attr, None)
+        return setattr(obj, name, value)
+
+def hook_all(restore=False, hooks=None):
+    if hooks is None:
+        hooks: List[Hook] = [
+            hook_calc_cond_uncond_batch(),
+            hook_sag_create_blur_map(),
+            hook_samplers_pre_run_control(),
+        ]
+    for m in sys.modules:
         for hook in hooks:
-            if hook.module_name == m or (os.name != 'nt' and m.endswith(hook.module_name_unix)) or (os.name == 'nt' and m.endswith(hook.module_name_nt)):
-                if hasattr(sys.modules[m], hook.fn.__name__):
-                    if not hasattr(sys.modules[m], hook.orig_key):
-                        if (orig_fn:=getattr(sys.modules[m], hook.fn.__name__, None)) is not None:
-                            setattr(sys.modules[m], hook.orig_key, orig_fn)
-                    setattr(sys.modules[m], hook.fn.__name__, hook.fn)
+            if m == hook.module_name or m.endswith(hook.module_name_path):
+                if _hasattr(sys.modules[m], hook.target):
+                    if not _hasattr(sys.modules[m], hook.orig_key):
+                        if (orig_fn:=_getattr(sys.modules[m], hook.target, None)) is not None:
+                            _setattr(sys.modules[m], hook.orig_key, orig_fn)
+                    if restore:
+                        _setattr(sys.modules[m], hook.target, _getattr(sys.modules[m], hook.orig_key, None))
+                    else:
+                        _setattr(sys.modules[m], hook.target, hook.fn)
 
-
-def inject_code(original_func, data, mode='w'):
+def inject_code(original_func, data, mode='a'):
     # Get the source code of the original function
     original_source = inspect.getsource(original_func)
 
@@ -164,7 +186,7 @@ def inject_code(original_func, data, mode='w'):
     modified_source = dedent(modified_source.strip("\n"))
     return write_to_file_and_return_fn(original_func, modified_source, mode)
 
-def write_to_file_and_return_fn(original_func, source:str,mode):
+def write_to_file_and_return_fn(original_func, source:str, mode='a'):
     # Write the modified source code to a temporary file so the
     # source code and stack traces can still be viewed when debugging.
     custom_name = ".patches.py"
