@@ -7,10 +7,14 @@ import functools
 import os
 import sys
 import binascii
-from collections import namedtuple
-from typing import List
+from typing import List, NamedTuple
 
-Hook = namedtuple('Hook', ['fn', 'module_name', 'target', 'orig_key', 'module_name_path'])
+class Hook(NamedTuple):
+    fn: object
+    module_name: str
+    target: str
+    orig_key: str
+    module_name_path: str
 
 def gen_id():
     return binascii.hexlify(os.urandom(1024))[64:72].decode("utf-8")
@@ -40,7 +44,7 @@ def hook_sag_create_blur_map():
         import comfy_extras
         from comfy_extras import nodes_sag
         imported = True
-    except: ...
+    except Exception: ...
     if not imported: return
     import comfy_extras
     from comfy_extras import nodes_sag
@@ -65,7 +69,7 @@ def hook_samplers_pre_run_control():
     payload = [{
         "dedent": False,
         "target_line": "if 'control' in x:",
-        "code_to_insert": """    try: x['control'].cleanup()\n    except: ..."""
+        "code_to_insert": """    try: x['control'].cleanup()\n    except Exception: ..."""
     },  
     {
     "target_line": "s = model.model_sampling",
@@ -147,17 +151,17 @@ def hook_all(restore=False, hooks=None):
             hook_samplers_pre_run_control(),
             hook_gligen__set_position(),
         ]
-    for m in sys.modules:
+    for key, module in sys.modules.items():
         for hook in hooks:
-            if m == hook.module_name or m.endswith(hook.module_name_path):
-                if _hasattr(sys.modules[m], hook.target):
-                    if not _hasattr(sys.modules[m], hook.orig_key):
-                        if (orig_fn:=_getattr(sys.modules[m], hook.target, None)) is not None:
-                            _setattr(sys.modules[m], hook.orig_key, orig_fn)
+            if key == hook.module_name or key.endswith(hook.module_name_path):
+                if _hasattr(module, hook.target):
+                    if not _hasattr(module, hook.orig_key):
+                        if (orig_fn:=_getattr(module, hook.target, None)) is not None:
+                            _setattr(module, hook.orig_key, orig_fn)
                     if restore:
-                        _setattr(sys.modules[m], hook.target, _getattr(sys.modules[m], hook.orig_key, None))
+                        _setattr(module, hook.target, _getattr(module, hook.orig_key, None))
                     else:
-                        _setattr(sys.modules[m], hook.target, hook.fn)
+                        _setattr(module, hook.target, hook.fn)
 
 def inject_code(original_func, data, mode='a'):
     # Get the source code of the original function
