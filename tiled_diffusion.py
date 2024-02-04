@@ -127,9 +127,10 @@ class AbstractDiffusion:
         # ext. ControlNet
         self.enable_controlnet: bool = False
         # self.controlnet_script: ModuleType = None
-        # self.control_tensor_batch: List[List[Tensor]] = None
+        self.control_tensor_batch_dict = {}
         self.control_tensor_batch: List[List[Tensor]] = [[]]
-        self.control_params: Dict[str, Tensor] = None # {}
+        # self.control_params: Dict[str, Tensor] = None # {}
+        self.control_params: Dict[Tuple, List[List[Tensor]]] = {}
         self.control_tensor_cpu: bool = None
         self.control_tensor_custom: List[List[Tensor]] = []
 
@@ -290,21 +291,25 @@ class AbstractDiffusion:
             #     control_tile = control_tile.repeat([x_batch_size if is_denoise else x_batch_size * 2, 1, 1, 1])
             # self.control_params[param_id].hint_cond = control_tile.to(devices.device)
 
-    def process_controlnet(self, c_in: dict, bboxes, batch_size: int, batch_id: int):
+    def process_controlnet(self, c_in: dict, cond_or_uncond: List, bboxes, batch_size: int, batch_id: int):
         control = c_in['control']
-        param_id = 0 # current controlnet & previous_controlnets
+        param_id = -1 # current controlnet & previous_controlnets
+        tuple_key = tuple(cond_or_uncond)
         while control is not None:
-            # Below is taken from comfy.controlnet.py
-            # but we need to additionally tile the cnets.
+            param_id += 1
             PH, PW = self.h*8, self.w*8
             
-            if param_id+1 >= len(self.control_tensor_batch):
-                self.control_tensor_batch.extend([[] for _ in range(param_id+1)])
-            if len(self.batched_bboxes) >= len(self.control_tensor_batch[param_id]):
-                self.control_tensor_batch[param_id].extend([[] for _ in range(len(self.batched_bboxes))])
+            if self.control_params.get(tuple_key, None) is None:
+                self.control_params[tuple_key] = [[None]]
+                val = self.control_params[tuple_key]
+                if param_id+1 >= len(val):
+                    val.extend([[None] for _ in range(param_id+1)])
+                if len(self.batched_bboxes) >= len(val[param_id]):
+                    val[param_id].extend([[None] for _ in range(len(self.batched_bboxes))])
 
+            # Below is taken from comfy.controlnet.py, but we need to additionally tile the cnets.
             # if statement: eager eval. first time when cond_hint is None. 
-            if self.refresh or control.cond_hint is None or not isinstance(self.control_tensor_batch[param_id][batch_id], Tensor):
+            if self.refresh or control.cond_hint is None or not isinstance(self.control_params[tuple_key][param_id][batch_id], Tensor):
                 if isinstance(control, ControlNet):
                     dtype = control.manual_cast_dtype if control.manual_cast_dtype is not None else control.control_model.dtype
                     control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', 'center').to(dtype=dtype, device=control.device)
@@ -323,11 +328,10 @@ class AbstractDiffusion:
                     cond_hint_pre_tile = self.repeat_tensor(control.cond_hint, ceildiv(batch_size, control.cond_hint.shape[0]))[:batch_size]
                 cns = [cond_hint_pre_tile[:, :, bbox[1]*opt_f:bbox[3]*opt_f, bbox[0]*opt_f:bbox[2]*opt_f] for bbox in bboxes]
                 control.cond_hint = torch.cat(cns, dim=0)
-                self.control_tensor_batch[param_id][batch_id]=control.cond_hint
+                self.control_params[tuple_key][param_id][batch_id]=control.cond_hint
             else:
-                control.cond_hint = self.control_tensor_batch[param_id][batch_id]
+                control.cond_hint = self.control_params[tuple_key][param_id][batch_id]
             control = control.previous_controlnet
-            param_id += 1
 
 import numpy as np
 from numpy import pi, exp, sqrt
@@ -395,7 +399,7 @@ class MultiDiffusion(AbstractDiffusion):
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
                     control=c_in['control']
-                    self.process_controlnet(c_in, bboxes, N, batch_id)
+                    self.process_controlnet(c_in, cond_or_uncond, bboxes, N, batch_id)
                     c_tile['control'] = control.get_control(x_tile, ts_tile, c_tile, len(cond_or_uncond))
 
                 # stablesr tiling
@@ -524,7 +528,7 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes), is_denoise=True)
                 if 'control' in c_in:
                     control=c_in['control']
-                    self.process_controlnet(c_in, bboxes, N, batch_id)
+                    self.process_controlnet(c_in,cond_or_uncond, bboxes, N, batch_id)
                     c_tile['control'] = control.get_control(x_tile, t_tile, c_tile, len(cond_or_uncond))
                 
                 # stablesr
