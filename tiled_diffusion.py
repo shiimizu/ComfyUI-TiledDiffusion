@@ -6,11 +6,9 @@ from comfy.model_patcher import ModelPatcher
 import comfy.model_patcher
 from comfy.model_base import BaseModel
 from typing import List, Union, Tuple, Dict
-from tqdm import tqdm
 from nodes import ImageScale
 import comfy.utils
 from comfy.controlnet import ControlNet, T2IAdapter
-from copy import deepcopy
 
 opt_C = 4
 opt_f = 8
@@ -291,10 +289,10 @@ class AbstractDiffusion:
             #     control_tile = control_tile.repeat([x_batch_size if is_denoise else x_batch_size * 2, 1, 1, 1])
             # self.control_params[param_id].hint_cond = control_tile.to(devices.device)
 
-    def process_controlnet(self, c_in: dict, cond_or_uncond: List, bboxes, batch_size: int, batch_id: int):
-        control = c_in['control']
+    def process_controlnet(self, x_shape, x_dtype, c_in: dict, cond_or_uncond: List, bboxes, batch_size: int, batch_id: int):
+        control: ControlNet = c_in['control']
         param_id = -1 # current controlnet & previous_controlnets
-        tuple_key = tuple(cond_or_uncond)
+        tuple_key = tuple(cond_or_uncond) + tuple(x_shape)
         while control is not None:
             param_id += 1
             PH, PW = self.h*8, self.w*8
@@ -310,14 +308,27 @@ class AbstractDiffusion:
             # Below is taken from comfy.controlnet.py, but we need to additionally tile the cnets.
             # if statement: eager eval. first time when cond_hint is None. 
             if self.refresh or control.cond_hint is None or not isinstance(self.control_params[tuple_key][param_id][batch_id], Tensor):
-                if isinstance(control, ControlNet):
-                    dtype = control.manual_cast_dtype if control.manual_cast_dtype is not None else control.control_model.dtype
-                    control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', 'center').to(dtype=dtype, device=control.device)
-                elif isinstance(control, T2IAdapter):
+                dtype = getattr(control, 'manual_cast_dtype', None)
+                if dtype is None: dtype = getattr(getattr(control, 'control_model', None), 'dtype', None)
+                if dtype is None: dtype = x_dtype
+                if isinstance(control, T2IAdapter):
                     width, height = control.scale_image_to(PW, PH)
                     control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, width, height, 'nearest-exact', "center").float().to(control.device)
                     if control.channels_in == 1 and control.cond_hint.shape[1] > 1:
                         control.cond_hint = torch.mean(control.cond_hint, 1, keepdim=True)
+                elif control.__class__.__name__ == 'ControlLLLiteAdvanced':
+                    if control.sub_idxs is not None and control.cond_hint_original.shape[0] >= control.full_latent_length:
+                        control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original[control.sub_idxs], PW, PH, 'nearest-exact', "center").to(dtype=dtype, device=control.device)
+                    else:
+                        if (PH, PW) == (control.cond_hint_original.shape[-2], control.cond_hint_original.shape[-1]):
+                            control.cond_hint = control.cond_hint_original.clone().to(dtype=dtype, device=control.device)
+                        else:
+                            control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', "center").to(dtype=dtype, device=control.device)
+                else:
+                    if (PH, PW) == (control.cond_hint_original.shape[-2], control.cond_hint_original.shape[-1]):
+                        control.cond_hint = control.cond_hint_original.clone().to(dtype=dtype, device=control.device)
+                    else:
+                        control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', 'center').to(dtype=dtype, device=control.device)
                 
                 # Broadcast then tile
                 #
@@ -399,7 +410,7 @@ class MultiDiffusion(AbstractDiffusion):
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
                     control=c_in['control']
-                    self.process_controlnet(c_in, cond_or_uncond, bboxes, N, batch_id)
+                    self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
                     c_tile['control'] = control.get_control(x_tile, ts_tile, c_tile, len(cond_or_uncond))
 
                 # stablesr tiling
@@ -528,7 +539,7 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes), is_denoise=True)
                 if 'control' in c_in:
                     control=c_in['control']
-                    self.process_controlnet(c_in,cond_or_uncond, bboxes, N, batch_id)
+                    self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
                     c_tile['control'] = control.get_control(x_tile, t_tile, c_tile, len(cond_or_uncond))
                 
                 # stablesr
