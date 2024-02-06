@@ -402,9 +402,13 @@ class MultiDiffusion(AbstractDiffusion):
                 c_tile['c_crossattn'] = cond_tile
                 if 'time_context' in c_in:
                     c_tile['time_context'] = self.repeat_tensor(c_in['time_context'], n_rep)
-                for key in ['y', 'c_concat']:
-                    if key in c_tile:
-                        c_tile[key] = self.repeat_tensor(c_tile[key], n_rep)
+                for key in c_tile:
+                    if key in ['y', 'c_concat']:
+                        icond = c_tile[key]
+                        if icond.shape[2:] == (self.h, self.w):
+                            c_tile[key] = torch.cat([icond[bbox.slicer] for bbox in bboxes])
+                        else:
+                            c_tile[key] = self.repeat_tensor(icond, n_rep)
 
                 # controlnet tiling
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
@@ -529,8 +533,8 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 c_tile['c_crossattn'] = tcond_tile
                 if 'time_context' in c_in:
                     c_tile['time_context'] = self.repeat_tensor(c_in['time_context'], n_rep) # just repeat
-                for key in ['y', 'c_concat']:
-                    if key in c_in:
+                for key in c_tile:
+                    if key in ['y', 'c_concat']:
                         icond_tile = torch.cat(icond_map[key], dim=0)  # differs each
                         c_tile[key] = icond_tile
                 # vcond_tile = torch.cat(vcond_tile_list, dim=0) if None not in vcond_tile_list else None # just repeat
