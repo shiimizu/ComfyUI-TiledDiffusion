@@ -634,9 +634,9 @@ class NoiseInversion():
 
 NODE_CLASS_MAPPINGS = {
     "TiledDiffusion": TiledDiffusion,
-    "NoiseInversion": NoiseInversion,
+    # "NoiseInversion": NoiseInversion,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "TiledDiffusion": "Tiled Diffusion",
-    "NoiseInversion": "Noise Inversion",
+    # "NoiseInversion": "Noise Inversion",
 }
