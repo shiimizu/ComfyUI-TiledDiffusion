@@ -20,9 +20,14 @@ def gen_id():
     return binascii.hexlify(os.urandom(1024))[64:72].decode("utf-8")
 
 def hook_calc_cond_uncond_batch():
-    from comfy.samplers import calc_cond_uncond_batch
+    try:
+        from comfy.samplers import calc_cond_batch
+        calc_cond_batch_ = calc_cond_batch
+    except Exception:
+        from comfy.samplers import calc_cond_uncond_batch
+        calc_cond_batch_ = calc_cond_uncond_batch
     # this function should only be run by us
-    orig_key = f"calc_cond_uncond_batch_original_tiled_diffusion_{gen_id()}"
+    orig_key = f"{calc_cond_batch_.__name__}_original_tiled_diffusion_{gen_id()}"
     payload = [{
         "mode": "replace",
         "target_line": 'control.get_control',
@@ -30,12 +35,12 @@ def hook_calc_cond_uncond_batch():
     },
     {
         "dedent": False,
-        "target_line": 'calc_cond_uncond_batch',
+        "target_line": calc_cond_batch_.__name__,
         "code_to_insert": f"""
     if 'tiled_diffusion' not in model_options:
-        return {orig_key}(model, cond, uncond, x_in, timestep, model_options)"""
+        return {orig_key}{inspect.signature(calc_cond_batch_)}"""
     }]
-    fn = inject_code(calc_cond_uncond_batch, payload, 'w')
+    fn = inject_code(calc_cond_batch_, payload, 'w')
     return create_hook(fn, 'comfy.samplers', orig_key=orig_key)
 
 def hook_sag_create_blur_map():
