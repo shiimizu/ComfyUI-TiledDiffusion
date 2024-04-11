@@ -749,7 +749,7 @@ class VAEHook:
             del result, result_approx
             comfy.model_management.throw_exception_if_processing_interrupted()
         vae_dtype = comfy.model_management.vae_dtype()
-        return result.to(dtype=vae_dtype) if result is not None else result_approx.to(device=device, dtype=vae_dtype)
+        return result.to(dtype=vae_dtype, device=device) if result is not None else result_approx.to(device=device, dtype=vae_dtype)
 
 # from .tiled_vae import VAEHook, get_rcmd_enc_tsize, get_rcmd_dec_tsize
 from nodes import VAEEncode, VAEDecode
