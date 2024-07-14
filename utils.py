@@ -109,6 +109,7 @@ def hook_samplers_pre_run_control():
 
 def hook_gligen__set_position():
     from comfy.gligen import Gligen
+    import re
     source=inspect.getsource(Gligen._set_position)
     replace_str="""
             nonlocal objs
@@ -116,8 +117,8 @@ def hook_gligen__set_position():
                 _objs = objs.repeat(-(x.shape[0] // -objs.shape[0]),1,1)
             else:
                 _objs = objs
-            return module(x, _objs)"""
-    modified_source = dedent(source.replace("    return module(x, objs)", replace_str, 1))
+            return module(x, _objs.to(device=x.device, dtype=x.dtype))"""
+    modified_source = dedent(re.sub(r"    return module\(.*", replace_str, source, 1, re.MULTILINE) or source)
     fn = write_to_file_and_return_fn(Gligen._set_position, modified_source)
     return create_hook(fn, 'comfy.gligen', 'Gligen._set_position')
 
