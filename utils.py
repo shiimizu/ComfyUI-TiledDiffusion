@@ -158,6 +158,8 @@ def hook_all(restore=False, hooks=None):
         ]
     for key, module in sys.modules.items():
         for hook in hooks:
+            if hook is None:
+                continue
             if key == hook.module_name or key.endswith(hook.module_name_path):
                 if _hasattr(module, hook.target):
                     if not _hasattr(module, hook.orig_key):
