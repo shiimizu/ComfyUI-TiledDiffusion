@@ -297,13 +297,14 @@ class AbstractDiffusion:
             param_id += 1
             PH, PW = self.h*8, self.w*8
             
-            if self.control_params.get(tuple_key, None) is None:
+            if tuple_key not in self.control_params:
                 self.control_params[tuple_key] = [[None]]
-                val = self.control_params[tuple_key]
-                if param_id+1 >= len(val):
-                    val.extend([[None] for _ in range(param_id+1)])
-                if len(self.batched_bboxes) >= len(val[param_id]):
-                    val[param_id].extend([[None] for _ in range(len(self.batched_bboxes))])
+
+            while len(self.control_params[tuple_key]) <= param_id:
+                self.control_params[tuple_key].append([None])
+
+            while len(self.control_params[tuple_key][param_id]) <= batch_id:
+                self.control_params[tuple_key][param_id].append(None)
 
             # Below is taken from comfy.controlnet.py, but we need to additionally tile the cnets.
             # if statement: eager eval. first time when cond_hint is None. 
