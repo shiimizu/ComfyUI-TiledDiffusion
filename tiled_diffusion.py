@@ -1,14 +1,14 @@
-from __future__ import division
 import torch
 from torch import Tensor
-import comfy.model_management
-from comfy.model_patcher import ModelPatcher
-import comfy.model_patcher
-from comfy.model_base import BaseModel
-from typing import List, Union, Tuple, Dict
-from nodes import ImageScale
 import comfy.utils
+import comfy.model_patcher
+import comfy.model_management
+from nodes import ImageScale
+from comfy.model_base import BaseModel
+from comfy.model_patcher import ModelPatcher
 from comfy.controlnet import ControlNet, T2IAdapter
+from typing import List, Union, Tuple, Dict
+from weakref import WeakSet
 
 opt_C = 4
 opt_f = 8
@@ -365,7 +365,7 @@ class CondDict: ...
 
 class MultiDiffusion(AbstractDiffusion):
     
-    @torch.no_grad()
+    @torch.inference_mode()
     def __call__(self, model_function: BaseModel.apply_model, args: dict):
         x_in: Tensor = args["input"]
         t_in: Tensor = args["timestep"]
@@ -416,7 +416,7 @@ class MultiDiffusion(AbstractDiffusion):
                 if 'control' in c_in:
                     control=c_in['control']
                     self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
-                    c_tile['control'] = control.get_control(x_tile, ts_tile, c_tile, len(cond_or_uncond))
+                    c_tile['control'] = control.get_control_orig(x_tile, ts_tile, c_tile, len(cond_or_uncond))
 
                 # stablesr tiling
                 # self.switch_stablesr_tensors(batch_id)
@@ -465,7 +465,7 @@ class MixtureOfDiffusers(AbstractDiffusion):
         self.tile_weights = self.get_weight(self.tile_w, self.tile_h)
         return self.tile_weights
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def __call__(self, model_function: BaseModel.apply_model, args: dict):
         x_in: Tensor = args["input"]
         t_in: Tensor = args["timestep"]
@@ -545,7 +545,7 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 if 'control' in c_in:
                     control=c_in['control']
                     self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
-                    c_tile['control'] = control.get_control(x_tile, t_tile, c_tile, len(cond_or_uncond))
+                    c_tile['control'] = control.get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
                 
                 # stablesr
                 # self.switch_stablesr_tensors(batch_id)
@@ -568,9 +568,6 @@ class MixtureOfDiffusers(AbstractDiffusion):
 
         return x_out
 
-from .utils import hook_all
-hook_all()
-
 MAX_RESOLUTION=8192
 class TiledDiffusion():
     @classmethod
@@ -587,29 +584,39 @@ class TiledDiffusion():
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "apply"
     CATEGORY = "_for_testing"
+    instances = WeakSet()
+
+    @classmethod
+    def IS_CHANGED(s, *args, **kwargs):
+        for o in s.instances:
+            o.impl.reset()
+        return ""
+    
+    def __init__(self) -> None:
+        self.__class__.instances.add(self)
 
     def apply(self, model: ModelPatcher, method, tile_width, tile_height, tile_overlap, tile_batch_size):
         if method == "Mixture of Diffusers":
-            implement = MixtureOfDiffusers()
+            self.impl = MixtureOfDiffusers()
         else:
-            implement = MultiDiffusion()
+            self.impl = MultiDiffusion()
         
         # if noise_inversion:
         #     get_cache_callback = self.noise_inverse_get_cache
         #     set_cache_callback = None # lambda x0, xt, prompts: self.noise_inverse_set_cache(p, x0, xt, prompts, steps, retouch)
-        #     implement.init_noise_inverse(steps, retouch, get_cache_callback, set_cache_callback, renoise_strength, renoise_kernel_size)
+        #     self.impl.init_noise_inverse(steps, retouch, get_cache_callback, set_cache_callback, renoise_strength, renoise_kernel_size)
 
-        implement.tile_width = tile_width // opt_f
-        implement.tile_height = tile_height // opt_f
-        implement.tile_overlap = tile_overlap // opt_f
-        implement.tile_batch_size = tile_batch_size
-        # implement.init_grid_bbox(tile_width, tile_height, tile_overlap, tile_batch_size)
+        self.impl.tile_width = tile_width // opt_f
+        self.impl.tile_height = tile_height // opt_f
+        self.impl.tile_overlap = tile_overlap // opt_f
+        self.impl.tile_batch_size = tile_batch_size
+        # self.impl.init_grid_bbox(tile_width, tile_height, tile_overlap, tile_batch_size)
         # # init everything done, perform sanity check & pre-computations
-        # implement.init_done()
+        # self.impl.init_done()
         # hijack the behaviours
-        # implement.hook()
+        # self.impl.hook()
         model = model.clone()
-        model.set_model_unet_function_wrapper(implement)
+        model.set_model_unet_function_wrapper(self.impl)
         model.model_options['tiled_diffusion'] = True
         return (model,)
 
