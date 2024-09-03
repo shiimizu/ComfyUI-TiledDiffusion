@@ -1,5 +1,7 @@
 import torch
 from torch import Tensor
+from typing import List, Union, Tuple, Callable, Dict
+from weakref import WeakSet
 import comfy.utils
 import comfy.model_patcher
 import comfy.model_management
@@ -7,8 +9,7 @@ from nodes import ImageScale
 from comfy.model_base import BaseModel
 from comfy.model_patcher import ModelPatcher
 from comfy.controlnet import ControlNet, T2IAdapter
-from typing import List, Union, Tuple, Dict
-from weakref import WeakSet
+from comfy.model_management import processing_interrupted
 
 opt_C = 4
 opt_f = 8
@@ -52,6 +53,15 @@ class BBox:
 
     def __getitem__(self, idx:int) -> int:
         return self.box[idx]
+
+def repeat_to_batch_size(tensor, batch_size, dim=0):
+    if dim == 0 and tensor.shape[dim] == 1:
+        return tensor.expand([batch_size] + [-1] * (len(tensor.shape) - 1))
+    if tensor.shape[dim] > batch_size:
+        return tensor.narrow(dim, 0, batch_size)
+    elif tensor.shape[dim] < batch_size:
+        return tensor.repeat(dim * [1] + [ceildiv(batch_size, tensor.shape[dim])] + [1] * (len(tensor.shape) - 1 - dim)).narrow(dim, 0, batch_size)
+    return tensor
 
 def split_bboxes(w:int, h:int, tile_w:int, tile_h:int, overlap:int=16, init_weight:Union[Tensor, float]=1.0) -> Tuple[List[BBox], Tensor]:
     cols = ceildiv((w - overlap) , (tile_w - overlap))
@@ -200,6 +210,26 @@ class AbstractDiffusion:
         self.tile_bs = ceildiv(len(bboxes) , self.num_batches)          # optimal_batch_size
         self.batched_bboxes = [bboxes[i*self.tile_bs:(i+1)*self.tile_bs] for i in range(self.num_batches)]
 
+    # detached version of above
+    @grid_bbox
+    def get_grid_bbox(self, tile_w: int, tile_h: int, overlap: int, tile_bs: int, w: int, h: int, 
+                    device: torch.device, get_tile_weights: Callable = lambda: 1.0) -> List[List[BBox]]:
+        weights = torch.zeros((1, 1, h, w), device=device, dtype=torch.float32)
+        # enable_grid_bbox = True
+
+        tile_w = min(tile_w, w)
+        tile_h = min(tile_h, h)
+        overlap = max(0, min(overlap, min(tile_w, tile_h) - 4))
+        # split the latent into overlapped tiles, then batching
+        # weights basically indicate how many times a pixel is painted
+        bboxes, weights_ = split_bboxes(w, h, tile_w, tile_h, overlap, get_tile_weights())
+        weights += weights_
+        num_tiles = len(bboxes)
+        num_batches = ceildiv(num_tiles, tile_bs)
+        tile_bs = ceildiv(len(bboxes), num_batches)          # optimal_batch_size
+        batched_bboxes = [bboxes[i*tile_bs:(i+1)*tile_bs] for i in range(num_batches)]
+        return batched_bboxes
+
     @grid_bbox
     def get_tile_weights(self) -> Union[Tensor, float]:
         return 1.0
@@ -336,8 +366,9 @@ class AbstractDiffusion:
                 # Below can be in the parent's if clause because self.refresh will trigger on resolution change, e.g. cause of ConditioningSetArea
                 # so that particular case isn't cached atm.
                 cond_hint_pre_tile = control.cond_hint
-                if control.cond_hint.shape[0] < batch_size :
-                    cond_hint_pre_tile = self.repeat_tensor(control.cond_hint, ceildiv(batch_size, control.cond_hint.shape[0]))[:batch_size]
+                if control.cond_hint.shape[0] != batch_size :
+                    cond_hint_pre_tile = repeat_to_batch_size(control.cond_hint, batch_size)
+                opt_f=self.compression
                 cns = [cond_hint_pre_tile[:, :, bbox[1]*opt_f:bbox[3]*opt_f, bbox[0]*opt_f:bbox[2]*opt_f] for bbox in bboxes]
                 control.cond_hint = torch.cat(cns, dim=0)
                 self.control_params[tuple_key][param_id][batch_id]=control.cond_hint
@@ -371,7 +402,6 @@ class MultiDiffusion(AbstractDiffusion):
         t_in: Tensor = args["timestep"]
         c_in: dict = args["c"]
         cond_or_uncond: List = args["cond_or_uncond"]
-        c_crossattn: Tensor = c_in['c_crossattn']
 
         N, C, H, W = x_in.shape
 
@@ -390,42 +420,50 @@ class MultiDiffusion(AbstractDiffusion):
         # Background sampling (grid bbox)
         if self.draw_background:
             for batch_id, bboxes in enumerate(self.batched_bboxes):
-                if comfy.model_management.processing_interrupted(): 
+                if processing_interrupted(): 
                     # self.pbar.close()
                     return x_in
 
                 # batching & compute tiles
                 x_tile = torch.cat([x_in[bbox.slicer] for bbox in bboxes], dim=0)   # [TB, C, TH, TW]
-                n_rep = len(bboxes)
-                ts_tile = self.repeat_tensor(t_in, n_rep)
-                cond_tile = self.repeat_tensor(c_crossattn, n_rep)
-                c_tile = c_in.copy()
-                c_tile['c_crossattn'] = cond_tile
-                if 'time_context' in c_in:
-                    c_tile['time_context'] = self.repeat_tensor(c_in['time_context'], n_rep)
-                for key in c_tile:
-                    if key in ['y', 'c_concat']:
-                        icond = c_tile[key]
-                        if icond.shape[2:] == (self.h, self.w):
-                            c_tile[key] = torch.cat([icond[bbox.slicer] for bbox in bboxes])
-                        else:
-                            c_tile[key] = self.repeat_tensor(icond, n_rep)
+                t_tile = repeat_to_batch_size(t_in, x_tile.shape[0])
+                c_tile = {}
+                for k, v in c_in.items():
+                    if isinstance(v, torch.Tensor):
+                        if len(v.shape) == len(x_tile.shape):
+                            bboxes_ = bboxes
+                            if v.shape[-2:] != x_in.shape[-2:]:
+                                cf = x_in.shape[-1] * self.compression // v.shape[-1] # compression factor
+                                bboxes_ = self.get_grid_bbox(
+                                    self.width // cf,
+                                    self.height // cf,
+                                    self.overlap // cf,
+                                    self.tile_batch_size,
+                                    v.shape[-1],
+                                    v.shape[-2],
+                                    x_in.device,
+                                    self.get_tile_weights,
+                                )
+                            v = torch.cat([v[bbox_.slicer] for bbox_ in bboxes_[batch_id]])
+                        if v.shape[0] != x_tile.shape[0]:
+                            v = repeat_to_batch_size(v, x_tile.shape[0])
+                    c_tile[k] = v
 
                 # controlnet tiling
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
                     control=c_in['control']
                     self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
-                    c_tile['control'] = control.get_control_orig(x_tile, ts_tile, c_tile, len(cond_or_uncond))
+                    c_tile['control'] = control.get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
 
                 # stablesr tiling
                 # self.switch_stablesr_tensors(batch_id)
 
-                x_tile_out = model_function(x_tile, ts_tile, **c_tile)
+                x_tile_out = model_function(x_tile, t_tile, **c_tile)
 
                 for i, bbox in enumerate(bboxes):
                     self.x_buffer[bbox.slicer] += x_tile_out[i*N:(i+1)*N, :, :, :]
-                del x_tile_out, x_tile, ts_tile, c_tile
+                del x_tile_out, x_tile, t_tile, c_tile
 
                 # update progress bar
                 # self.update_pbar()
@@ -471,7 +509,6 @@ class MixtureOfDiffusers(AbstractDiffusion):
         t_in: Tensor = args["timestep"]
         c_in: dict = args["c"]
         cond_or_uncond: List= args["cond_or_uncond"]
-        c_crossattn: Tensor = c_in['c_crossattn']
 
         N, C, H, W = x_in.shape
 
@@ -493,53 +530,38 @@ class MixtureOfDiffusers(AbstractDiffusion):
         # Global sampling
         if self.draw_background:
             for batch_id, bboxes in enumerate(self.batched_bboxes):     # batch_id is the `Latent tile batch size`
-                if comfy.model_management.processing_interrupted(): 
+                if processing_interrupted(): 
                     # self.pbar.close()
                     return x_in
-
                 # batching
                 x_tile_list     = []
-                t_tile_list     = []
-                icond_map = {}
-                # tcond_tile_list = []
-                # icond_tile_list = []
-                # vcond_tile_list = []
-                # control_list = []
                 for bbox in bboxes:
                     x_tile_list.append(x_in[bbox.slicer])
-                    t_tile_list.append(t_in)
-                    if isinstance(c_in, dict):
-                        # tcond
-                        # tcond_tile = c_crossattn #self.get_tcond(c_in)      # cond, [1, 77, 768]
-                        # tcond_tile_list.append(tcond_tile)
-                        # present in sdxl
-                        for key in ['y', 'c_concat']:
-                            if key in c_in:
-                                icond=c_in[key] # self.get_icond(c_in)
-                                if icond.shape[2:] == (self.h, self.w):
-                                    icond = icond[bbox.slicer]
-                                if icond_map.get(key, None) is None:
-                                    icond_map[key] = []
-                                icond_map[key].append(icond)
-                        # # vcond:
-                        # vcond = self.get_vcond(c_in)
-                        # vcond_tile_list.append(vcond)
-                    else:
-                        print('>> [WARN] not supported, make an issue on github!!')
-                n_rep = len(bboxes)
-                x_tile      = torch.cat(x_tile_list,     dim=0)          # differs each
-                t_tile      = self.repeat_tensor(t_in, n_rep)           # just repeat
-                tcond_tile = self.repeat_tensor(c_crossattn, n_rep) # just repeat
-                c_tile = c_in.copy()
-                c_tile['c_crossattn'] = tcond_tile
-                if 'time_context' in c_in:
-                    c_tile['time_context'] = self.repeat_tensor(c_in['time_context'], n_rep) # just repeat
-                for key in c_tile:
-                    if key in ['y', 'c_concat']:
-                        icond_tile = torch.cat(icond_map[key], dim=0)  # differs each
-                        c_tile[key] = icond_tile
-                # vcond_tile = torch.cat(vcond_tile_list, dim=0) if None not in vcond_tile_list else None # just repeat
 
+                x_tile = torch.cat(x_tile_list, dim=0)                     # differs each
+                t_tile = repeat_to_batch_size(t_in, x_tile.shape[0])   # just repeat
+                c_tile = {}
+                for k, v in c_in.items():
+                    if isinstance(v, torch.Tensor):
+                        if len(v.shape) == len(x_tile.shape):
+                            bboxes_ = bboxes
+                            if v.shape[-2:] != x_in.shape[-2:]:
+                                cf = x_in.shape[-1] * self.compression // v.shape[-1] # compression factor
+                                bboxes_ = self.get_grid_bbox(
+                                    (tile_w := self.width // cf),
+                                    (tile_h := self.height // cf),
+                                    self.overlap // cf,
+                                    self.tile_batch_size,
+                                    v.shape[-1],
+                                    v.shape[-2],
+                                    x_in.device,
+                                    lambda: self.get_weight(tile_w, tile_h),
+                                )
+                            v = torch.cat([v[bbox_.slicer] for bbox_ in bboxes_[batch_id]])
+                        if v.shape[0] != x_tile.shape[0]:
+                            v = repeat_to_batch_size(v, x_tile.shape[0])
+                    c_tile[k] = v
+                
                 # controlnet
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes), is_denoise=True)
                 if 'control' in c_in:
@@ -606,10 +628,16 @@ class TiledDiffusion():
         #     set_cache_callback = None # lambda x0, xt, prompts: self.noise_inverse_set_cache(p, x0, xt, prompts, steps, retouch)
         #     self.impl.init_noise_inverse(steps, retouch, get_cache_callback, set_cache_callback, renoise_strength, renoise_kernel_size)
 
-        self.impl.tile_width = tile_width // opt_f
-        self.impl.tile_height = tile_height // opt_f
-        self.impl.tile_overlap = tile_overlap // opt_f
+        compression = 4 if "CASCADE" in str(model.model.model_type) else 8
+        self.impl.tile_width = tile_width // compression
+        self.impl.tile_height = tile_height // compression
+        self.impl.tile_overlap = tile_overlap // compression
         self.impl.tile_batch_size = tile_batch_size
+        
+        self.impl.compression = compression
+        self.impl.width = tile_width
+        self.impl.height  = tile_height
+        self.impl.overlap = tile_overlap    
         # self.impl.init_grid_bbox(tile_width, tile_height, tile_overlap, tile_batch_size)
         # # init everything done, perform sanity check & pre-computations
         # self.impl.init_done()
