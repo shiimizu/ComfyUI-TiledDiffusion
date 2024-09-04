@@ -9,7 +9,9 @@ from nodes import ImageScale
 from comfy.model_base import BaseModel
 from comfy.model_patcher import ModelPatcher
 from comfy.controlnet import ControlNet, T2IAdapter
+from comfy.utils import common_upscale
 from comfy.model_management import processing_interrupted
+from math import pi
 
 opt_C = 4
 opt_f = 8
@@ -146,6 +148,7 @@ class AbstractDiffusion:
         self.control_tensor_cpu = False
         self.weights = None
         self.imagescale = ImageScale()
+        self.uniform_distribution = None
 
     def reset(self):
         tile_width = self.tile_width
@@ -319,13 +322,13 @@ class AbstractDiffusion:
             #     control_tile = control_tile.repeat([x_batch_size if is_denoise else x_batch_size * 2, 1, 1, 1])
             # self.control_params[param_id].hint_cond = control_tile.to(devices.device)
 
-    def process_controlnet(self, x_shape, x_dtype, c_in: dict, cond_or_uncond: List, bboxes, batch_size: int, batch_id: int):
+    def process_controlnet(self, x_shape, x_dtype, c_in: dict, cond_or_uncond: List, bboxes, batch_size: int, batch_id: int, shifts=None):
         control: ControlNet = c_in['control']
-        param_id = -1 # current controlnet & previous_controlnets
+        param_id = -1 # current controlnet & previous controlnets
         tuple_key = tuple(cond_or_uncond) + tuple(x_shape)
         while control is not None:
             param_id += 1
-            PH, PW = self.h*8, self.w*8
+            PH, PW = self.h * control.compression_ratio, self.w * control.compression_ratio
             
             if tuple_key not in self.control_params:
                 self.control_params[tuple_key] = [[None]]
@@ -344,34 +347,29 @@ class AbstractDiffusion:
                 if dtype is None: dtype = x_dtype
                 if isinstance(control, T2IAdapter):
                     width, height = control.scale_image_to(PW, PH)
-                    control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, width, height, 'nearest-exact', "center").float().to(control.device)
+                    cns = common_upscale(control.cond_hint_original, width, height, 'nearest-exact', "center").float().to(control.device)
                     if control.channels_in == 1 and control.cond_hint.shape[1] > 1:
-                        control.cond_hint = torch.mean(control.cond_hint, 1, keepdim=True)
+                        cns = torch.mean(control.cond_hint, 1, keepdim=True)
                 elif control.__class__.__name__ == 'ControlLLLiteAdvanced':
                     if control.sub_idxs is not None and control.cond_hint_original.shape[0] >= control.full_latent_length:
-                        control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original[control.sub_idxs], PW, PH, 'nearest-exact', "center").to(dtype=dtype, device=control.device)
+                        cns = common_upscale(control.cond_hint_original[control.sub_idxs], PW, PH, 'nearest-exact', "center").to(dtype=dtype, device=control.device)
                     else:
-                        if (PH, PW) == (control.cond_hint_original.shape[-2], control.cond_hint_original.shape[-1]):
-                            control.cond_hint = control.cond_hint_original.clone().to(dtype=dtype, device=control.device)
-                        else:
-                            control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', "center").to(dtype=dtype, device=control.device)
+                        cns = common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', "center").to(dtype=dtype, device=control.device)
                 else:
-                    if (PH, PW) == (control.cond_hint_original.shape[-2], control.cond_hint_original.shape[-1]):
-                        control.cond_hint = control.cond_hint_original.clone().to(dtype=dtype, device=control.device)
-                    else:
-                        control.cond_hint = comfy.utils.common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', 'center').to(dtype=dtype, device=control.device)
+                    cns = common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', 'center').to(dtype=dtype, device=control.device)
                 
-                # Broadcast then tile
+                # Tile the ControlNets
                 #
-                # Below can be in the parent's if clause because self.refresh will trigger on resolution change, e.g. cause of ConditioningSetArea
-                # so that particular case isn't cached atm.
-                cond_hint_pre_tile = control.cond_hint
-                if control.cond_hint.shape[0] != batch_size :
-                    cond_hint_pre_tile = repeat_to_batch_size(control.cond_hint, batch_size)
-                opt_f=self.compression
-                cns = [cond_hint_pre_tile[:, :, bbox[1]*opt_f:bbox[3]*opt_f, bbox[0]*opt_f:bbox[2]*opt_f] for bbox in bboxes]
-                control.cond_hint = torch.cat(cns, dim=0)
-                self.control_params[tuple_key][param_id][batch_id]=control.cond_hint
+                # Below can be in this if clause because self.refresh will trigger on resolution change,
+                # e.g. cause of ConditioningSetArea, so that particular case isn't cached atm.
+                # cf = control.compression_ratio
+                cf = self.compression
+                if cns.shape[0] != batch_size:
+                    cns = repeat_to_batch_size(cns, batch_size)
+                if shifts is not None:
+                    cns = cns.roll(shifts=shifts, dims=(-2,-1))
+                control.cond_hint = torch.cat([cns[:, :, bbox[1]*cf:bbox[3]*cf, bbox[0]*cf:bbox[2]*cf] for bbox in bboxes], dim=0)
+                self.control_params[tuple_key][param_id][batch_id] = control.cond_hint
             else:
                 control.cond_hint = self.control_params[tuple_key][param_id][batch_id]
             control = control.previous_controlnet
@@ -452,9 +450,8 @@ class MultiDiffusion(AbstractDiffusion):
                 # controlnet tiling
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
-                    control=c_in['control']
                     self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
-                    c_tile['control'] = control.get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
+                    c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
 
                 # stablesr tiling
                 # self.switch_stablesr_tensors(batch_id)
@@ -470,6 +467,135 @@ class MultiDiffusion(AbstractDiffusion):
 
         # Averaging background buffer
         x_out = torch.where(self.weights > 1, self.x_buffer / self.weights, self.x_buffer)
+
+        return x_out
+
+from .utils import store
+
+def fibonacci_spacing(x):
+    result = torch.zeros_like(x)
+    fib = [0, 1]
+    while fib[-1] < len(x):
+        fib.append(fib[-1] + fib[-2])
+    
+    used_indices = set()
+    for i, val in enumerate(x):
+        fib_index = i % len(fib)
+        target_index = fib[fib_index] % len(x)
+        while target_index in used_indices:
+            target_index = (target_index + 1) % len(x)
+        result[target_index] = val
+        used_indices.add(target_index)
+    
+    return result
+
+def find_nearest(a,b):
+    # Calculate the absolute differences. 
+    diff = (a - b).abs()
+
+    # Find the indices of the nearest elements
+    nearest_indices = diff.argmin()
+
+    # Get the nearest elements from b
+    return b[nearest_indices]
+
+class SpotDiffusion(AbstractDiffusion):
+    
+    @torch.inference_mode()
+    def __call__(self, model_function: BaseModel.apply_model, args: dict):
+        x_in: Tensor = args["input"]
+        t_in: Tensor = args["timestep"]
+        c_in: dict = args["c"]
+        cond_or_uncond: List = args["cond_or_uncond"]
+
+        N, C, H, W = x_in.shape
+
+        # comfyui can feed in a latent that's a different size cause of SetArea, so we'll refresh in that case.
+        self.refresh = False
+        if self.weights is None or self.h != H or self.w != W:
+            self.h, self.w = H, W
+            self.refresh = True
+            self.init_grid_bbox(self.tile_width, self.tile_height, self.tile_overlap, self.tile_batch_size)
+            # init everything done, perform sanity check & pre-computations
+            self.init_done()
+        self.h, self.w = H, W
+        # clear buffer canvas
+        self.reset_buffer(x_in)
+
+        sigmas = store.sigmas
+        if self.uniform_distribution is None:
+            shift_method = store.model_options.get('tiled_diffusion_shift_method', 'random')
+            seed = store.model_options.get('tiled_diffusion_seed', store.extra_args.get('seed', 0))
+            shift_height = torch.randint(0, self.tile_height, (len(sigmas)-1,), generator=torch.Generator(device='cpu').manual_seed(seed), device='cpu')
+            shift_width = torch.randint(0, self.tile_width, (len(sigmas)-1,), generator=torch.Generator(device='cpu').manual_seed(seed), device='cpu')
+            if shift_method == "sorted":
+                shift_height = shift_height.sort().values
+                shift_width = shift_width.sort().values
+            elif shift_method == "fibonacci":
+                shift_height = fibonacci_spacing(shift_height.sort().values)
+                shift_width = fibonacci_spacing(shift_width.sort().values)
+            self.uniform_distribution = (shift_height, shift_width)
+
+        ts_in = find_nearest(t_in[0], sigmas)
+        step = ss.item() if (ss:=(sigmas == ts_in).nonzero()).shape[0] != 0 else 0
+        cur_i = min(sigmas.shape[0]-1, step + getattr(store, 'start_step', 0))
+
+        sh_h = self.uniform_distribution[0][cur_i].item()
+        sh_w = self.uniform_distribution[1][cur_i].item()
+        x_in = x_in.roll(shifts=(sh_h,sh_w), dims=(-2,-1))
+
+        # Background sampling (grid bbox)
+        if self.draw_background:
+            for batch_id, bboxes in enumerate(self.batched_bboxes):
+                if processing_interrupted(): 
+                    # self.pbar.close()
+                    return x_in
+
+                # batching & compute tiles
+                x_tile = torch.cat([x_in[bbox.slicer] for bbox in bboxes], dim=0)   # [TB, C, TH, TW]
+                t_tile = repeat_to_batch_size(t_in, x_tile.shape[0])
+                c_tile = {}
+                for k, v in c_in.items():
+                    if isinstance(v, torch.Tensor):
+                        if len(v.shape) == len(x_tile.shape):
+                            bboxes_ = bboxes
+                            if v.shape[-2:] != x_in.shape[-2:]:
+                                cf = x_in.shape[-1] * self.compression // v.shape[-1] # compression factor
+                                bboxes_ = self.get_grid_bbox(
+                                    self.width // cf,
+                                    self.height // cf,
+                                    self.overlap // cf,
+                                    self.tile_batch_size,
+                                    v.shape[-1],
+                                    v.shape[-2],
+                                    x_in.device,
+                                    self.get_tile_weights,
+                                )
+                            v = torch.cat([v[bbox_.slicer] for bbox_ in bboxes_[batch_id]])
+                        if v.shape[0] != x_tile.shape[0]:
+                            v = repeat_to_batch_size(v, x_tile.shape[0])
+                    c_tile[k] = v
+
+                # controlnet tiling
+                # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
+                if 'control' in c_in:
+                    self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id, (sh_h,sh_w))
+                    c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
+
+                # stablesr tiling
+                # self.switch_stablesr_tensors(batch_id)
+
+                x_tile_out = model_function(x_tile, t_tile, **c_tile)
+
+                for i, bbox in enumerate(bboxes):
+                    self.x_buffer[bbox.slicer] = x_tile_out[i*N:(i+1)*N, :, :, :]
+
+                del x_tile_out, x_tile, t_tile, c_tile
+
+                # update progress bar
+                # self.update_pbar()
+
+        x_out = self.x_buffer.roll(shifts=(-sh_h, -sh_w), dims=(-2, -1))
 
         return x_out
 
@@ -565,9 +691,8 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 # controlnet
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes), is_denoise=True)
                 if 'control' in c_in:
-                    control=c_in['control']
                     self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
-                    c_tile['control'] = control.get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
+                    c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
                 
                 # stablesr
                 # self.switch_stablesr_tensors(batch_id)
@@ -595,7 +720,7 @@ class TiledDiffusion():
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"model": ("MODEL", ),
-                                "method": (["MultiDiffusion", "Mixture of Diffusers"], {"default": "Mixture of Diffusers"}),
+                                "method": (["MultiDiffusion", "Mixture of Diffusers", "SpotDiffusion"], {"default": "Mixture of Diffusers"}),
                                 # "tile_width": ("INT", {"default": 96, "min": 16, "max": 256, "step": 16}),
                                 "tile_width": ("INT", {"default": 96*opt_f, "min": 16, "max": MAX_RESOLUTION, "step": 16}),
                                 # "tile_height": ("INT", {"default": 96, "min": 16, "max": 256, "step": 16}),
@@ -620,8 +745,10 @@ class TiledDiffusion():
     def apply(self, model: ModelPatcher, method, tile_width, tile_height, tile_overlap, tile_batch_size):
         if method == "Mixture of Diffusers":
             self.impl = MixtureOfDiffusers()
-        else:
+        elif method == "MultiDiffusion":
             self.impl = MultiDiffusion()
+        else:
+            self.impl = SpotDiffusion()
         
         # if noise_inversion:
         #     get_cache_callback = self.noise_inverse_get_cache
@@ -637,7 +764,8 @@ class TiledDiffusion():
         self.impl.compression = compression
         self.impl.width = tile_width
         self.impl.height  = tile_height
-        self.impl.overlap = tile_overlap    
+        self.impl.overlap = tile_overlap
+
         # self.impl.init_grid_bbox(tile_width, tile_height, tile_overlap, tile_batch_size)
         # # init everything done, perform sanity check & pre-computations
         # self.impl.init_done()
@@ -646,6 +774,23 @@ class TiledDiffusion():
         model = model.clone()
         model.set_model_unet_function_wrapper(self.impl)
         model.model_options['tiled_diffusion'] = True
+        return (model,)
+
+class SpotDiffusionParams():
+    @classmethod
+    def INPUT_TYPES(s):
+        return {"required": {"model": ("MODEL", ),
+                                "shift_method": (["random", "sorted", "fibonacci"], {"default": "random", "tooltip": "Samples a shift size over a uniform distribution to shift tiles."}),
+                                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                            }}
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = "_for_testing"
+
+    def apply(self, model: ModelPatcher, shift_method, seed):
+        model = model.clone()
+        model.model_options['tiled_diffusion_seed'] = seed
+        model.model_options['tiled_diffusion_shift_method'] = shift_method
         return (model,)
 
 class NoiseInversion():
@@ -670,9 +815,11 @@ class NoiseInversion():
 
 NODE_CLASS_MAPPINGS = {
     "TiledDiffusion": TiledDiffusion,
+    "SpotDiffusionParams_TiledDiffusion": SpotDiffusionParams,
     # "NoiseInversion": NoiseInversion,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "TiledDiffusion": "Tiled Diffusion",
+    "SpotDiffusionParams_TiledDiffusion": "SpotDiffusion Parameters",
     # "NoiseInversion": "Noise Inversion",
 }

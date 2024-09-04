@@ -4,7 +4,7 @@ Check out the [SD-WebUI extension](https://github.com/pkuliyi2015/multidiffusion
 
 This extension enables **large image drawing & upscaling with limited VRAM** via the following techniques:
 
-1. Two SOTA diffusion tiling algorithms: [Mixture of Diffusers](https://github.com/albarji/mixture-of-diffusers) <a href="https://arxiv.org/abs/2302.02412"><img width="32" alt="Mixture of Diffusers Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a> and [MultiDiffusion](https://github.com/omerbt/MultiDiffusion) <a href="https://arxiv.org/abs/2302.08113"><img width="32" alt="MultiDiffusion Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a>
+1. SOTA diffusion tiling algorithms: [Mixture of Diffusers](https://github.com/albarji/mixture-of-diffusers) <a href="https://arxiv.org/abs/2302.02412"><img width="32" alt="Mixture of Diffusers Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a>, [MultiDiffusion](https://github.com/omerbt/MultiDiffusion) <a href="https://arxiv.org/abs/2302.08113"><img width="32" alt="MultiDiffusion Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a>, and [SpotDiffusion](https://arxiv.org/abs/2407.15507) <a href="https://arxiv.org/abs/2407.15507"><img width="32" alt="SpotDiffusion Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a>
 2. pkuliyi2015 & Kahsolt's Tiled VAE algorithm.
 3. ~~pkuliyi2015 & Kahsolt's TIled Noise Inversion for better upscaling.~~
 
@@ -13,7 +13,10 @@ This extension enables **large image drawing & upscaling with limited VRAM** via
 
 
 ## Features
-- [x] SDXL model support
+- [x] Model support
+    - [x] SD1.x, SD2.x, SDXL, SD3
+    - [x] Stable Cascade
+    - [x] FLUX
 - [x] ControlNet support
 - [ ] ~~StableSR support~~
 - [ ] ~~Tiled Noise Inversion~~
@@ -29,7 +32,11 @@ This extension enables **large image drawing & upscaling with limited VRAM** via
 </div>
 
 > [!TIP]  
-> Set `tile_overlap` to 0 and `denoise` to 1 to see the tile seams and then adjust the options to your needs. Also, increase `tile_batch_size` to increase speed (if your machine can handle it).
+> * Set `tile_overlap` to 0 and `denoise` to 1 to see the tile seams and then adjust the options to your needs.
+> * Increase `tile_batch_size` to increase speed (if your machine can handle it).
+> * Use the [colorfix node](https://github.com/gameltb/Comfyui-StableSR) if your colors look off.
+
+### Options
 
 | Name              | Description                                                  |
 |-------------------|--------------------------------------------------------------|
@@ -64,6 +71,7 @@ The recommended tile sizes are given upon the creation of the node based on the 
 > [!NOTE]  
 > Enabling `fast` for the decoder may produce images with slightly higher contrast and brightness.
 
+### Options
 
 | Name        | Description                                                                                                                                  |
 |-------------|----------------------------------------------------------------------------------------------------------------------------------------------|
