@@ -10,7 +10,7 @@ from comfy.model_base import BaseModel
 from comfy.model_patcher import ModelPatcher
 from comfy.controlnet import ControlNet, T2IAdapter
 from comfy.utils import common_upscale
-from comfy.model_management import processing_interrupted
+from comfy.model_management import processing_interrupted, loaded_models, load_models_gpu
 from math import pi
 
 opt_C = 4
@@ -155,7 +155,15 @@ class AbstractDiffusion:
         tile_height = self.tile_height
         tile_overlap = self.tile_overlap
         tile_batch_size = self.tile_batch_size
+        compression = self.compression
+        width = self.width
+        height  = self.height 
+        overlap = self.overlap
         self.__init__()
+        self.compression = compression
+        self.width = width
+        self.height  = height
+        self.overlap = overlap
         self.tile_width = tile_width
         self.tile_height = tile_height
         self.tile_overlap = tile_overlap
@@ -328,7 +336,11 @@ class AbstractDiffusion:
         tuple_key = tuple(cond_or_uncond) + tuple(x_shape)
         while control is not None:
             param_id += 1
-            PH, PW = self.h * control.compression_ratio, self.w * control.compression_ratio
+
+            cf = control.compression_ratio
+            if control.vae is not None:
+                cf *= control.vae.downscale_ratio
+            PH, PW = self.h * cf, self.w * cf
             
             if tuple_key not in self.control_params:
                 self.control_params[tuple_key] = [[None]]
@@ -342,36 +354,49 @@ class AbstractDiffusion:
             # Below is taken from comfy.controlnet.py, but we need to additionally tile the cnets.
             # if statement: eager eval. first time when cond_hint is None. 
             if self.refresh or control.cond_hint is None or not isinstance(self.control_params[tuple_key][param_id][batch_id], Tensor):
+                if control.cond_hint is not None:
+                    del control.cond_hint
+                control.cond_hint = None
                 dtype = getattr(control, 'manual_cast_dtype', None)
                 if dtype is None: dtype = getattr(getattr(control, 'control_model', None), 'dtype', None)
                 if dtype is None: dtype = x_dtype
                 if isinstance(control, T2IAdapter):
                     width, height = control.scale_image_to(PW, PH)
-                    cns = common_upscale(control.cond_hint_original, width, height, 'nearest-exact', "center").float().to(control.device)
+                    cns = common_upscale(control.cond_hint_original, width, height, control.upscale_algorithm, "center").float().to(control.device)
                     if control.channels_in == 1 and control.cond_hint.shape[1] > 1:
                         cns = torch.mean(control.cond_hint, 1, keepdim=True)
                 elif control.__class__.__name__ == 'ControlLLLiteAdvanced':
                     if control.sub_idxs is not None and control.cond_hint_original.shape[0] >= control.full_latent_length:
-                        cns = common_upscale(control.cond_hint_original[control.sub_idxs], PW, PH, 'nearest-exact', "center").to(dtype=dtype, device=control.device)
+                        cns = common_upscale(control.cond_hint_original[control.sub_idxs], PW, PH, control.upscale_algorithm, "center").to(dtype=dtype, device=control.device)
                     else:
-                        cns = common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', "center").to(dtype=dtype, device=control.device)
+                        cns = common_upscale(control.cond_hint_original, PW, PH, control.upscale_algorithm, "center").to(dtype=dtype, device=control.device)
                 else:
-                    cns = common_upscale(control.cond_hint_original, PW, PH, 'nearest-exact', 'center').to(dtype=dtype, device=control.device)
-                
+                    cns = common_upscale(control.cond_hint_original, PW, PH, control.upscale_algorithm, 'center').to(dtype=dtype, device=control.device)
+                    if control.vae is not None:
+                        loaded_models_ = loaded_models(only_currently_used=True)
+                        cns = control.vae.encode(cns.movedim(1, -1))
+                        load_models_gpu(loaded_models_)
+                    if control.latent_format is not None:
+                        cns = control.latent_format.process_in(cns)
+                    cns = cns.to(device=control.device, dtype=dtype)
+
                 # Tile the ControlNets
                 #
                 # Below can be in this if clause because self.refresh will trigger on resolution change,
                 # e.g. cause of ConditioningSetArea, so that particular case isn't cached atm.
-                # cf = control.compression_ratio
-                cf = self.compression
                 if cns.shape[0] != batch_size:
                     cns = repeat_to_batch_size(cns, batch_size)
                 if shifts is not None:
-                    cns = cns.roll(shifts=shifts, dims=(-2,-1))
+                    control.cns = cns
+                    cns = cns.roll(shifts=tuple(x * cf for x in shifts), dims=(-2,-1))
                 control.cond_hint = torch.cat([cns[:, :, bbox[1]*cf:bbox[3]*cf, bbox[0]*cf:bbox[2]*cf] for bbox in bboxes], dim=0)
                 self.control_params[tuple_key][param_id][batch_id] = control.cond_hint
             else:
-                control.cond_hint = self.control_params[tuple_key][param_id][batch_id]
+                if hasattr(control,'cns') and shifts is not None:
+                    cns = control.cns.roll(shifts=tuple(x * cf for x in shifts), dims=(-2,-1))
+                    control.cond_hint = torch.cat([cns[:, :, bbox[1]*cf:bbox[3]*cf, bbox[0]*cf:bbox[2]*cf] for bbox in bboxes], dim=0)
+                else:
+                    control.cond_hint = self.control_params[tuple_key][param_id][batch_id]
             control = control.previous_controlnet
 
 import numpy as np
