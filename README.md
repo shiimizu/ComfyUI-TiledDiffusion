@@ -40,7 +40,7 @@ This extension enables **large image drawing & upscaling with limited VRAM** via
 
 | Name              | Description                                                  |
 |-------------------|--------------------------------------------------------------|
-| `method`          | Tiling [strategy](https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1111/blob/fbb24736c9bc374c7f098f82b575fcd14a73936a/scripts/tilediffusion.py#L39-L46). `MultiDiffusion` or `Mixture of Diffusers`. |
+| `method`          | Tiling [strategy](https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1111/blob/fbb24736c9bc374c7f098f82b575fcd14a73936a/scripts/tilediffusion.py#L39-L46).  |
 | `tile_width`      | Tile's width                                                 |
 | `tile_height`     | Tile's height                                                |
 | `tile_overlap`    | Tile's overlap                                               |
@@ -57,6 +57,12 @@ If you have the [Math Expression](https://github.com/pythongosssss/ComfyUI-Custo
 `pixel height of input image or latent // R` = `tile_height`
 
 <img width="800" alt="Tile_arrangement" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/9952e7d8-909e-436f-a284-c00f0fb71665">
+
+### SpotDiffusion
+
+A fast tiling algortihm that eliminates seams by shifting the denoise window per timestep.
+
+To get the most out of SpotDiffusion, you'll want nice, clean tiles with no "overlaps". Overlaps are treated as another tile. Set `tile_overlap` to 0 and adjust `tile_width` and `tile_height` so your input image/latent is nicely divisible by it. That should result in faster gens. 
 
 ## Tiled VAE
 
