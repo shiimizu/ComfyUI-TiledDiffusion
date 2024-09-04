@@ -13,18 +13,30 @@ store = Store()
 
 import comfy.samplers
 
-def KSampler_sample(*args, **kwargs):
-    orig_fn = store.KSampler_sample
-    start_step = get_value_from_args(orig_fn, args, kwargs, 'start_step', 6)
-    if start_step is not None:
-        store.start_step = start_step
-    return orig_fn(*args, **kwargs)
-
 def KSAMPLER_sample(*args, **kwargs):
     orig_fn = store.KSAMPLER_sample
-    store.sigmas = get_value_from_args(orig_fn, args, kwargs, 'sigmas', 2)
-    store.extra_args = get_value_from_args(orig_fn, args, kwargs, 'extra_args', 3)
-    store.model_options = store.extra_args['model_options']
+    extra_args = kwargs['extra_args'] if 'extra_args' in kwargs else args[3]
+    model_options = extra_args['model_options']
+    sigmas = kwargs['sigmas'] if 'sigmas' in kwargs else args[2]
+    sigmas_all = model_options.get('sigmas', None)
+    sigmas_ = sigmas_all if sigmas_all is not None else sigmas
+    store.sigmas = sigmas_
+    store.model_options = model_options
+    store.extra_args = extra_args
+    return orig_fn(*args, **kwargs)
+
+def KSampler_sample(*args, **kwargs):
+    orig_fn = store.KSampler_sample
+    self = args[0]
+    sigmas_ = kwargs['sigmas'] if 'sigmas' in kwargs else args[11]
+    sigmas = getattr(self, 'sigmas', sigmas_)
+    model_patcher = getattr(self, 'model', None)
+    model_options = getattr(model_patcher, 'model_options', None)
+    if model_options is not None:
+        model_options = model_options.copy()
+        if sigmas is not None:
+            model_options['sigmas'] = sigmas
+        self.model.model_options = model_options
     return orig_fn(*args, **kwargs)
 
 def get_area_and_mult(*args, **kwargs):
@@ -41,21 +53,6 @@ def get_area_and_mult(*args, **kwargs):
             if hasattr(control, 'get_control_orig') and control.get_control != control.get_control_orig:
                 control.get_control = control.get_control_orig
     return store.get_area_and_mult(*args, **kwargs)
-
-def get_value_from_args(fn, args, kwargs, key_to_lookup, idx=None):
-    value = None
-    if key_to_lookup in kwargs:
-        value = kwargs[key_to_lookup]
-    else:
-        try:
-            # Get its position in the formal parameters list and retrieve from args
-            arg_names = fn.__code__.co_varnames[:fn.__code__.co_argcount]
-            index = arg_names.index(key_to_lookup)
-            value = args[index] if index < len(args) else None
-        except Exception:
-            if idx is not None and idx < len(args):
-                value = args[idx]
-    return value
 
 def register_hooks():
     patches = [

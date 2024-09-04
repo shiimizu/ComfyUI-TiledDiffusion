@@ -149,6 +149,7 @@ class AbstractDiffusion:
         self.weights = None
         self.imagescale = ImageScale()
         self.uniform_distribution = None
+        self.sigmas = None
 
     def reset(self):
         tile_width = self.tile_width
@@ -547,8 +548,8 @@ class SpotDiffusion(AbstractDiffusion):
         # clear buffer canvas
         self.reset_buffer(x_in)
 
-        sigmas = store.sigmas
         if self.uniform_distribution is None:
+            sigmas = self.sigmas = store.sigmas
             shift_method = store.model_options.get('tiled_diffusion_shift_method', 'random')
             seed = store.model_options.get('tiled_diffusion_seed', store.extra_args.get('seed', 0))
             shift_height = torch.randint(0, self.tile_height, (len(sigmas)-1,), generator=torch.Generator(device='cpu').manual_seed(seed), device='cpu')
@@ -561,9 +562,9 @@ class SpotDiffusion(AbstractDiffusion):
                 shift_width = fibonacci_spacing(shift_width.sort().values)
             self.uniform_distribution = (shift_height, shift_width)
 
+        sigmas = self.sigmas
         ts_in = find_nearest(t_in[0], sigmas)
-        step = ss.item() if (ss:=(sigmas == ts_in).nonzero()).shape[0] != 0 else 0
-        cur_i = min(sigmas.shape[0]-1, step + getattr(store, 'start_step', 0))
+        cur_i = ss.item() if (ss:=(sigmas == ts_in).nonzero()).shape[0] != 0 else 0
 
         sh_h = self.uniform_distribution[0][cur_i].item()
         sh_w = self.uniform_distribution[1][cur_i].item()
