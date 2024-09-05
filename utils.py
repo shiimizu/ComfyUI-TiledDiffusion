@@ -37,7 +37,7 @@ def KSampler_sample(*args, **kwargs):
     model_options = getattr(model_patcher, 'model_options', None)
     if model_options is not None and 'tiled_diffusion' in model_options:
         sigmas = None
-        try: sigmas = kwargs['sigmas'] if 'sigmas' in kwargs else args[11]
+        try: sigmas = kwargs['sigmas'] if 'sigmas' in kwargs else args[10]
         except Exception: ...
         if sigmas is None:
             sigmas = getattr(self, 'sigmas', None)
