@@ -331,7 +331,7 @@ class AbstractDiffusion:
             #     control_tile = control_tile.repeat([x_batch_size if is_denoise else x_batch_size * 2, 1, 1, 1])
             # self.control_params[param_id].hint_cond = control_tile.to(devices.device)
 
-    def process_controlnet(self, x_shape, x_dtype, c_in: dict, cond_or_uncond: List, bboxes, batch_size: int, batch_id: int, shifts=None):
+    def process_controlnet(self, x_shape, x_dtype, c_in: dict, cond_or_uncond: List, bboxes, batch_size: int, batch_id: int, shifts=None, shift_condition=None):
         control: ControlNet = c_in['control']
         param_id = -1 # current controlnet & previous controlnets
         tuple_key = tuple(cond_or_uncond) + tuple(x_shape)
@@ -390,13 +390,36 @@ class AbstractDiffusion:
                     cns = repeat_to_batch_size(cns, batch_size)
                 if shifts is not None:
                     control.cns = cns
-                    cns = cns.roll(shifts=tuple(x * cf for x in shifts), dims=(-2,-1))
+                    # cns = cns.roll(shifts=tuple(x * cf for x in shifts), dims=(-2,-1))
+                    sh_h,sh_w=shifts
+                    sh_h *= cf
+                    sh_w *= cf
+                    if (sh_h,sh_w) != (0,0):
+                        if sh_h == 0 or sh_w == 0:
+                            cns = control.cns.roll(shifts=(sh_h,sh_w), dims=(-2,-1))
+                        else:
+                            if shift_condition:
+                                cns = control.cns.roll(shifts=sh_h, dims=-2)
+                            else:
+                                cns = control.cns.roll(shifts=sh_w, dims=-1)
                 control.cond_hint = torch.cat([cns[:, :, bbox[1]*cf:bbox[3]*cf, bbox[0]*cf:bbox[2]*cf] for bbox in bboxes], dim=0).to(device=cns.device)
                 self.control_params[tuple_key][param_id][batch_id] = control.cond_hint
             else:
                 if hasattr(control,'cns') and shifts is not None:
                     cf = control.compression_ratio
-                    cns = control.cns.roll(shifts=tuple(x * cf for x in shifts), dims=(-2,-1))
+                    # cns = control.cns.roll(shifts=tuple(x * cf for x in shifts), dims=(-2,-1))
+                    cns = control.cns
+                    sh_h,sh_w=shifts
+                    sh_h *= cf
+                    sh_w *= cf
+                    if (sh_h,sh_w) != (0,0):
+                        if sh_h == 0 or sh_w == 0:
+                            cns = control.cns.roll(shifts=(sh_h,sh_w), dims=(-2,-1))
+                        else:
+                            if shift_condition:
+                                cns = control.cns.roll(shifts=sh_h, dims=-2)
+                            else:
+                                cns = control.cns.roll(shifts=sh_w, dims=-1)
                     control.cond_hint = torch.cat([cns[:, :, bbox[1]*cf:bbox[3]*cf, bbox[0]*cf:bbox[2]*cf] for bbox in bboxes], dim=0).to(device=cns.device)
                 else:
                     control.cond_hint = self.control_params[tuple_key][param_id][batch_id]
@@ -579,7 +602,20 @@ class SpotDiffusion(AbstractDiffusion):
 
         sh_h = self.uniform_distribution[0][cur_i].item()
         sh_w = self.uniform_distribution[1][cur_i].item()
-        x_in = x_in.roll(shifts=(sh_h,sh_w), dims=(-2,-1))
+        if min(self.tile_height, x_in.shape[-2]) == x_in.shape[-2]:
+            sh_h=0
+        if min(self.tile_width, x_in.shape[-1]) == x_in.shape[-1]:
+            sh_w=0
+        condition = cur_i % 2 == 0 if self.tile_height > self.tile_width else cur_i % 2 != 0
+        if (sh_h,sh_w) != (0,0):
+            # x_in = x_in.roll(shifts=(sh_h,sh_w), dims=(-2,-1))
+            if sh_h == 0 or sh_w == 0:
+                x_in = x_in.roll(shifts=(sh_h,sh_w), dims=(-2,-1))
+            else:
+                if condition:
+                    x_in = x_in.roll(shifts=sh_h, dims=-2)
+                else:
+                    x_in = x_in.roll(shifts=sh_w, dims=-1)
 
         # Background sampling (grid bbox)
         if self.draw_background:
@@ -619,7 +655,7 @@ class SpotDiffusion(AbstractDiffusion):
                 # controlnet tiling
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
-                    self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id, (sh_h,sh_w))
+                    self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id, (sh_h,sh_w), condition)
                     c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
 
                 # stablesr tiling
@@ -635,9 +671,17 @@ class SpotDiffusion(AbstractDiffusion):
                 # update progress bar
                 # self.update_pbar()
 
-        x_out = self.x_buffer.roll(shifts=(-sh_h, -sh_w), dims=(-2, -1))
+        if (sh_h,sh_w) != (0,0):
+            # self.x_buffer = self.x_buffer.roll(shifts=(-sh_h, -sh_w), dims=(-2, -1))
+            if sh_h == 0 or sh_w == 0:
+                self.x_buffer = self.x_buffer.roll(shifts=(-sh_h, -sh_w), dims=(-2, -1))
+            else:
+                if condition:
+                    self.x_buffer = self.x_buffer.roll(shifts=-sh_h, dims=-2)
+                else:
+                    self.x_buffer = self.x_buffer.roll(shifts=-sh_w, dims=-1)
 
-        return x_out
+        return self.x_buffer
 
 class MixtureOfDiffusers(AbstractDiffusion):
     """
