@@ -15,28 +15,36 @@ import comfy.samplers
 
 def KSAMPLER_sample(*args, **kwargs):
     orig_fn = store.KSAMPLER_sample
-    extra_args = kwargs['extra_args'] if 'extra_args' in kwargs else args[3]
-    model_options = extra_args['model_options']
-    sigmas = kwargs['sigmas'] if 'sigmas' in kwargs else args[2]
-    sigmas_all = model_options.get('sigmas', None)
-    sigmas_ = sigmas_all if sigmas_all is not None else sigmas
-    store.sigmas = sigmas_
-    store.model_options = model_options
-    store.extra_args = extra_args
+    extra_args = None
+    model_options = None
+    try:
+        extra_args = kwargs['extra_args'] if 'extra_args' in kwargs else args[3]
+        model_options = extra_args['model_options']
+    except Exception: ...
+    if model_options is not None and 'tiled_diffusion' in model_options and extra_args is not None:
+        sigmas_ = kwargs['sigmas'] if 'sigmas' in kwargs else args[2]
+        sigmas_all = model_options.pop('sigmas', None)
+        sigmas = sigmas_all if sigmas_all is not None else sigmas_
+        store.sigmas = sigmas
+        store.model_options = model_options
+        store.extra_args = extra_args
     return orig_fn(*args, **kwargs)
 
 def KSampler_sample(*args, **kwargs):
     orig_fn = store.KSampler_sample
     self = args[0]
-    sigmas_ = kwargs['sigmas'] if 'sigmas' in kwargs else args[11]
-    sigmas = getattr(self, 'sigmas', sigmas_)
     model_patcher = getattr(self, 'model', None)
     model_options = getattr(model_patcher, 'model_options', None)
-    if model_options is not None:
-        model_options = model_options.copy()
+    if model_options is not None and 'tiled_diffusion' in model_options:
+        sigmas = None
+        try: sigmas = kwargs['sigmas'] if 'sigmas' in kwargs else args[11]
+        except Exception: ...
+        if sigmas is None:
+            sigmas = getattr(self, 'sigmas', None)
         if sigmas is not None:
+            model_options = model_options.copy()
             model_options['sigmas'] = sigmas
-        self.model.model_options = model_options
+            self.model.model_options = model_options
     return orig_fn(*args, **kwargs)
 
 def get_area_and_mult(*args, **kwargs):
