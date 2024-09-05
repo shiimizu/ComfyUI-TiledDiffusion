@@ -4,18 +4,20 @@ Check out the [SD-WebUI extension](https://github.com/pkuliyi2015/multidiffusion
 
 This extension enables **large image drawing & upscaling with limited VRAM** via the following techniques:
 
-1. SOTA diffusion tiling algorithms: [Mixture of Diffusers](https://github.com/albarji/mixture-of-diffusers) <a href="https://arxiv.org/abs/2302.02412"><img width="32" alt="Mixture of Diffusers Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a>, [MultiDiffusion](https://github.com/omerbt/MultiDiffusion) <a href="https://arxiv.org/abs/2302.08113"><img width="32" alt="MultiDiffusion Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a>, and [SpotDiffusion](https://arxiv.org/abs/2407.15507) <a href="https://arxiv.org/abs/2407.15507"><img width="32" alt="SpotDiffusion Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a>
-2. pkuliyi2015 & Kahsolt's Tiled VAE algorithm.
-3. ~~pkuliyi2015 & Kahsolt's TIled Noise Inversion for better upscaling.~~
+- Reproduced SOTA Tiled Diffusion methods
+    - [MultiDiffusion](https://github.com/omerbt/MultiDiffusion) <a href="https://arxiv.org/abs/2302.08113"><img width="32" alt="MultiDiffusion Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a>
+    - [Mixture of Diffusers](https://github.com/albarji/mixture-of-diffusers) <a href="https://arxiv.org/abs/2302.02412"><img width="32" alt="Mixture of Diffusers Paper" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b753b7f6-f9c0-405d-bace-792b9bbce5d5"></a>
+- pkuliyi2015 & Kahsolt's Tiled VAE algorithm
+- ~~pkuliyi2015 & Kahsolt's TIled Noise Inversion method~~
 
 > [!NOTE]  
 > Sizes/dimensions are in pixels and then converted to latent-space sizes.
 
 
 ## Features
-- [x] Model support
+
+- [x] Supported models
     - [x] SD1.x, SD2.x, SDXL, SD3
-    - [x] Stable Cascade
     - [x] FLUX
 - [x] ControlNet support
 - [ ] ~~StableSR support~~
@@ -60,9 +62,11 @@ If you have the [Math Expression](https://github.com/pythongosssss/ComfyUI-Custo
 
 ### SpotDiffusion
 
-A fast tiling algortihm that eliminates seams by shifting the denoise window per timestep.
+[Paper](https://arxiv.org/abs/2407.15507)
 
-To get the most out of SpotDiffusion, you'll want nice, clean tiles with no "overlaps". Overlaps are treated as another tile. Set `tile_overlap` to 0 and adjust `tile_width` and `tile_height` so your input image/latent is nicely divisible by it. That should result in faster gens. 
+A tiling algorithm that attempts to eliminate seams by randomly shifting the denoise window per timestep. It is mainly used for fast inferences by setting `tile_overlap` to 0; otherwise, it's better to stick with the other tiling strategies as they produce better outputs.
+
+This additional feature is experimental, in testing,  and subject to change.
 
 ## Tiled VAE
 
@@ -104,6 +108,10 @@ The following images can be loaded in ComfyUI.
   <img alt="ComfyUI_07503_" src="https://github.com/shiimizu/ComfyUI-TiledDiffusion/assets/54494639/b681b617-4bb1-49e5-b85a-ef5a0f6e4830">
   <p>4x upscale. 3 passes.</p>
 </div>
+
+## License
+Great thanks to all the contributors! 🎉🎉🎉   
+The implementation of MultiDiffusion, Mixture of Diffusers, and Tiled VAE code is currently under [Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License](https://creativecommons.org/licenses/by-nc-sa/4.0/) since it was borrowed from the wonderful [SD-WebUI extension](https://github.com/pkuliyi2015/multidiffusion-upscaler-for-automatic1111/). Anything else GPLv3.
 
 ## Citation
 
