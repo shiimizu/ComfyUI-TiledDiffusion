@@ -28,6 +28,9 @@ def KSAMPLER_sample(*args, **kwargs):
         store.sigmas = sigmas
         store.model_options = model_options
         store.extra_args = extra_args
+    else:
+        for attr in  ['sigmas', 'model_options', 'extra_args']:
+            _delattr(store, attr)
     return orig_fn(*args, **kwargs)
 
 def KSampler_sample(*args, **kwargs):
@@ -61,6 +64,11 @@ def get_area_and_mult(*args, **kwargs):
             if hasattr(control, 'get_control_orig') and control.get_control != control.get_control_orig:
                 control.get_control = control.get_control_orig
     return store.get_area_and_mult(*args, **kwargs)
+
+def _delattr(obj, attr):
+    try:
+        if hasattr(obj, attr): delattr(obj, attr)
+    except Exception: ...
 
 def register_hooks():
     patches = [
