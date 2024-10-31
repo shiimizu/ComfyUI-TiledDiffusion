@@ -331,18 +331,13 @@ class AbstractDiffusion:
             #     control_tile = control_tile.repeat([x_batch_size if is_denoise else x_batch_size * 2, 1, 1, 1])
             # self.control_params[param_id].hint_cond = control_tile.to(devices.device)
 
-    def process_controlnet(self, x_shape, x_dtype, c_in: dict, cond_or_uncond: List, bboxes, batch_size: int, batch_id: int, shifts=None, shift_condition=None):
+    def process_controlnet(self, x_noisy, c_in: dict, cond_or_uncond: List, bboxes, batch_size: int, batch_id: int, shifts=None, shift_condition=None):
         control: ControlNet = c_in['control']
         param_id = -1 # current controlnet & previous controlnets
-        tuple_key = tuple(cond_or_uncond) + tuple(x_shape)
+        tuple_key = tuple(cond_or_uncond) + tuple(x_noisy.shape)
         while control is not None:
             param_id += 1
 
-            cf = control.compression_ratio
-            if control.vae is not None:
-                cf *= control.vae.downscale_ratio
-            PH, PW = self.h * cf, self.w * cf
-            
             if tuple_key not in self.control_params:
                 self.control_params[tuple_key] = [[None]]
 
@@ -358,28 +353,46 @@ class AbstractDiffusion:
                 if control.cond_hint is not None:
                     del control.cond_hint
                 control.cond_hint = None
+                compression_ratio = control.compression_ratio
+                if control.vae is not None:
+                    compression_ratio *= control.vae.downscale_ratio
+                else:
+                    if control.latent_format is not None:
+                        raise ValueError("This Controlnet needs a VAE but none was provided, please use a ControlNetApply node with a VAE input and connect it.")
+                PH, PW = self.h * compression_ratio, self.w * compression_ratio
+
+                device = getattr(control, 'device', x_noisy.device)
                 dtype = getattr(control, 'manual_cast_dtype', None)
                 if dtype is None: dtype = getattr(getattr(control, 'control_model', None), 'dtype', None)
-                if dtype is None: dtype = x_dtype
+                if dtype is None: dtype = x_noisy.dtype
+
                 if isinstance(control, T2IAdapter):
                     width, height = control.scale_image_to(PW, PH)
-                    cns = common_upscale(control.cond_hint_original, width, height, control.upscale_algorithm, "center").float().to(control.device)
+                    cns = common_upscale(control.cond_hint_original, width, height, control.upscale_algorithm, "center").float().to(device=device)
                     if control.channels_in == 1 and control.cond_hint.shape[1] > 1:
                         cns = torch.mean(control.cond_hint, 1, keepdim=True)
                 elif control.__class__.__name__ == 'ControlLLLiteAdvanced':
-                    if control.sub_idxs is not None and control.cond_hint_original.shape[0] >= control.full_latent_length:
-                        cns = common_upscale(control.cond_hint_original[control.sub_idxs], PW, PH, control.upscale_algorithm, "center").to(dtype=dtype, device=control.device)
+                    if getattr(control, 'sub_idxs', None) is not None and control.cond_hint_original.shape[0] >= control.full_latent_length:
+                        cns = common_upscale(control.cond_hint_original[control.sub_idxs], PW, PH, control.upscale_algorithm, "center").to(dtype=dtype, device=device)
                     else:
-                        cns = common_upscale(control.cond_hint_original, PW, PH, control.upscale_algorithm, "center").to(dtype=dtype, device=control.device)
+                        cns = common_upscale(control.cond_hint_original, PW, PH, control.upscale_algorithm, "center").to(dtype=dtype, device=device)
                 else:
-                    cns = common_upscale(control.cond_hint_original, PW, PH, control.upscale_algorithm, 'center').to(dtype=dtype, device=control.device)
+                    cns = common_upscale(control.cond_hint_original, PW, PH, control.upscale_algorithm, 'center').to(dtype=dtype, device=device)
                     if control.vae is not None:
                         loaded_models_ = loaded_models(only_currently_used=True)
                         cns = control.vae.encode(cns.movedim(1, -1))
                         load_models_gpu(loaded_models_)
                     if control.latent_format is not None:
                         cns = control.latent_format.process_in(cns)
-                    cns = cns.to(device=control.device, dtype=dtype)
+                    if len(control.extra_concat_orig) > 0:
+                        to_concat = []
+                        for c in control.extra_concat_orig:
+                            c = c.to(device=device)
+                            c = common_upscale(c, cns.shape[3], cns.shape[2], control.upscale_algorithm, "center")
+                            to_concat.append(repeat_to_batch_size(c, cns.shape[0]))
+                        cns = torch.cat([cns] + to_concat, dim=1)
+
+                    cns = cns.to(device=device, dtype=dtype)
 
                 # Tile the ControlNets
                 #
@@ -402,7 +415,10 @@ class AbstractDiffusion:
                                 cns = control.cns.roll(shifts=sh_h, dims=-2)
                             else:
                                 cns = control.cns.roll(shifts=sh_w, dims=-1)
-                control.cond_hint = torch.cat([cns[:, :, bbox[1]*cf:bbox[3]*cf, bbox[0]*cf:bbox[2]*cf] for bbox in bboxes], dim=0).to(device=cns.device)
+                cns_slices = [cns[:, :, bbox[1]*cf:bbox[3]*cf, bbox[0]*cf:bbox[2]*cf] for bbox in bboxes]
+                control.cond_hint = torch.cat(cns_slices, dim=0).to(device=cns.device)
+                del cns_slices
+                del cns
                 self.control_params[tuple_key][param_id][batch_id] = control.cond_hint
             else:
                 if hasattr(control,'cns') and shifts is not None:
@@ -420,7 +436,10 @@ class AbstractDiffusion:
                                 cns = control.cns.roll(shifts=sh_h, dims=-2)
                             else:
                                 cns = control.cns.roll(shifts=sh_w, dims=-1)
-                    control.cond_hint = torch.cat([cns[:, :, bbox[1]*cf:bbox[3]*cf, bbox[0]*cf:bbox[2]*cf] for bbox in bboxes], dim=0).to(device=cns.device)
+                    cns_slices = [cns[:, :, bbox[1]*cf:bbox[3]*cf, bbox[0]*cf:bbox[2]*cf] for bbox in bboxes]
+                    control.cond_hint = torch.cat(cns_slices, dim=0).to(device=cns.device)
+                    del cns_slices
+                    del cns
                 else:
                     control.cond_hint = self.control_params[tuple_key][param_id][batch_id]
             control = control.previous_controlnet
@@ -501,7 +520,7 @@ class MultiDiffusion(AbstractDiffusion):
                 # controlnet tiling
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
-                    self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
+                    self.process_controlnet(x_tile, c_in, cond_or_uncond, bboxes, N, batch_id)
                     c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
 
                 # stablesr tiling
@@ -655,7 +674,7 @@ class SpotDiffusion(AbstractDiffusion):
                 # controlnet tiling
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
-                    self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id, (sh_h,sh_w), condition)
+                    self.process_controlnet(x_tile, c_in, cond_or_uncond, bboxes, N, batch_id, (sh_h,sh_w), condition)
                     c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
 
                 # stablesr tiling
@@ -775,7 +794,7 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 # controlnet
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes), is_denoise=True)
                 if 'control' in c_in:
-                    self.process_controlnet(x_tile.shape, x_tile.dtype, c_in, cond_or_uncond, bboxes, N, batch_id)
+                    self.process_controlnet(x_tile, c_in, cond_or_uncond, bboxes, N, batch_id)
                     c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
                 
                 # stablesr
