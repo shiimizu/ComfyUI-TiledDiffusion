@@ -378,13 +378,13 @@ class AbstractDiffusion:
                         cns = common_upscale(control.cond_hint_original, PW, PH, control.upscale_algorithm, "center").to(dtype=dtype, device=device)
                 else:
                     cns = common_upscale(control.cond_hint_original, PW, PH, control.upscale_algorithm, 'center').to(dtype=dtype, device=device)
-                    if control.vae is not None:
+                    if getattr(control, 'vae', None) is not None:
                         loaded_models_ = loaded_models(only_currently_used=True)
                         cns = control.vae.encode(cns.movedim(1, -1))
                         load_models_gpu(loaded_models_)
-                    if control.latent_format is not None:
+                    if getattr(control, 'latent_format', None) is not None:
                         cns = control.latent_format.process_in(cns)
-                    if len(control.extra_concat_orig) > 0:
+                    if len(getattr(control, 'extra_concat_orig', ())) > 0:
                         to_concat = []
                         for c in control.extra_concat_orig:
                             c = c.to(device=device)
