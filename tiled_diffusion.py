@@ -354,10 +354,10 @@ class AbstractDiffusion:
                     del control.cond_hint
                 control.cond_hint = None
                 compression_ratio = control.compression_ratio
-                if control.vae is not None:
+                if getattr(control, 'vae', None) is not None:
                     compression_ratio *= control.vae.downscale_ratio
                 else:
-                    if control.latent_format is not None:
+                    if getattr(control, 'latent_format', None) is not None:
                         raise ValueError("This Controlnet needs a VAE but none was provided, please use a ControlNetApply node with a VAE input and connect it.")
                 PH, PW = self.h * compression_ratio, self.w * compression_ratio
 
@@ -378,6 +378,7 @@ class AbstractDiffusion:
                         cns = common_upscale(control.cond_hint_original, PW, PH, control.upscale_algorithm, "center").to(dtype=dtype, device=device)
                 else:
                     cns = common_upscale(control.cond_hint_original, PW, PH, control.upscale_algorithm, 'center').to(dtype=dtype, device=device)
+                    cns = control.preprocess_image(cns)
                     if getattr(control, 'vae', None) is not None:
                         loaded_models_ = loaded_models(only_currently_used=True)
                         cns = control.vae.encode(cns.movedim(1, -1))
@@ -521,7 +522,7 @@ class MultiDiffusion(AbstractDiffusion):
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
                     self.process_controlnet(x_tile, c_in, cond_or_uncond, bboxes, N, batch_id)
-                    c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
+                    c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond), c_in['transformer_options'])
 
                 # stablesr tiling
                 # self.switch_stablesr_tensors(batch_id)
@@ -675,7 +676,7 @@ class SpotDiffusion(AbstractDiffusion):
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes))
                 if 'control' in c_in:
                     self.process_controlnet(x_tile, c_in, cond_or_uncond, bboxes, N, batch_id, (sh_h,sh_w), condition)
-                    c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
+                    c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond), c_in['transformer_options'])
 
                 # stablesr tiling
                 # self.switch_stablesr_tensors(batch_id)
@@ -795,7 +796,7 @@ class MixtureOfDiffusers(AbstractDiffusion):
                 # self.switch_controlnet_tensors(batch_id, N, len(bboxes), is_denoise=True)
                 if 'control' in c_in:
                     self.process_controlnet(x_tile, c_in, cond_or_uncond, bboxes, N, batch_id)
-                    c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond))
+                    c_tile['control'] = c_in['control'].get_control_orig(x_tile, t_tile, c_tile, len(cond_or_uncond), c_in['transformer_options'])
                 
                 # stablesr
                 # self.switch_stablesr_tensors(batch_id)
