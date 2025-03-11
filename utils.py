@@ -92,8 +92,6 @@ def pre_run_control(model, conds):
     for t in range(len(conds)):
         x = conds[t]
 
-        timestep_start = None
-        timestep_end = None
         percent_to_timestep_function = lambda a: s.percent_to_sigma(a)
         if 'control' in x:
             try: x['control'].cleanup()
@@ -107,7 +105,7 @@ comfy.samplers.pre_run_control = pre_run_control
 from math import sqrt
 import torch.nn.functional as F
 import comfy_extras.nodes_sag
-from comfy_extras.nodes_sag import gaussian_blur_2d 
+from comfy_extras.nodes_sag import gaussian_blur_2d
 
 def calc_closest_factors(a):
     for b in range(int(sqrt(a)), 0, -1):

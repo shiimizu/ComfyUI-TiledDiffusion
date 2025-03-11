@@ -29,7 +29,7 @@
 #   2. When Fast Mode is disabled:
 #       1. The original VAE forward is decomposed into a task queue and a task worker, which starts to process each tile.
 #       2. When GroupNorm is needed, it suspends, stores current GroupNorm mean and var, send everything to RAM, and turns to the next tile.
-#       3. After all GroupNorm means and vars are summarized, it applies group norm to tiles and continues. 
+#       3. After all GroupNorm means and vars are summarized, it applies group norm to tiles and continues.
 #       4. A zigzag execution order is used to reduce unnecessary data transfer.
 #   3. When Fast Mode is enabled:
 #       1. The original input is downsampled and passed to a separate task queue.
@@ -191,7 +191,7 @@ def get_attn_func():
     return _attn_forward
 
 def attn2task(task_queue, net):
-    
+
     attn_forward = get_attn_func()
     task_queue.append(('store_res', lambda x: x))
     task_queue.append(('pre_norm', net.norm))
@@ -586,7 +586,7 @@ class VAEHook:
             try:
                 devices.test_for_nans(tile, "vae")
             except:
-                print(f'Nan detected in fast mode estimation. Fast mode disabled.')
+                print('Nan detected in fast mode estimation. Fast mode disabled.')
                 return False
 
         raise IndexError('Should not reach here')
@@ -765,7 +765,7 @@ class TiledVAE:
         vae = _vae.first_stage_model
         encoder = vae.encoder
         decoder = vae.decoder
-        
+
         # # undo hijack if disabled (in cases last time crashed)
         # if not enabled:
         #     if self.hooked:
@@ -783,9 +783,9 @@ class TiledVAE:
 
         # do hijack
         # kwargs = {
-        #     'fast_decoder': fast_decoder, 
-        #     'fast_encoder': fast_encoder, 
-        #     'color_fix':    color_fix, 
+        #     'fast_decoder': fast_decoder,
+        #     'fast_encoder': fast_encoder,
+        #     'color_fix':    color_fix,
         #     'to_gpu':       vae_to_gpu,
         # }
 
@@ -794,7 +794,7 @@ class TiledVAE:
         if not hasattr(decoder, 'original_forward'): setattr(decoder, 'original_forward', decoder.forward)
 
         # self.hooked = True
-        
+
         # encoder.forward = VAEHook(encoder, encoder_tile_size, is_decoder=False, **kwargs)
         # decoder.forward = VAEHook(decoder, decoder_tile_size, is_decoder=True,  **kwargs)
         fn = VAEHook(net=decoder if is_decoder else encoder, tile_size=tile_size // 8 if is_decoder else tile_size,
