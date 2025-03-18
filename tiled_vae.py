@@ -326,9 +326,9 @@ def custom_group_norm(input, num_groups, mean, var, weight=None, bias=None, eps=
 
     # post affine transform
     if weight is not None:
-        out *= weight.view(1, -1, 1, 1)
+        out *= weight.view(1, -1, 1, 1).to(device=devices.device)
     if bias is not None:
-        out += bias.view(1, -1, 1, 1)
+        out += bias.view(1, -1, 1, 1).to(device=devices.device)
     return out
 
 
@@ -599,7 +599,7 @@ class VAEHook:
         @param z: latent vector
         @return: image
         """
-        device = next(self.net.parameters()).device
+        device = devices.device # next(self.net.parameters()).device
         net = self.net
         tile_size = self.tile_size
         is_decoder = self.is_decoder
